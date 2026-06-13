@@ -1,0 +1,24 @@
+# Build artifacts
+/_build/
+/cover/
+/deps/
+/doc/
+/.fetch
+erl_crash.dump
+*.ez
+agentix-*.tar
+/tmp/
+
+# Dialyzer PLTs
+/priv/plts/*.plt
+/priv/plts/*.plt.hash
+
+# Environment / secrets
+.env
+*.secret.exs
+
+# Claude worktrees
+.claude/worktrees/
+
+# Design docs (local only)
+.docs/
