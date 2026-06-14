@@ -177,5 +177,42 @@ defmodule Agentix.ConversationTest do
       assert {:error, :unknown_conversation} =
                Conversation.send_message(id, "Hi", Scope.new())
     end
+
+    test "the audit model_call counter resumes after a kill/revive (no overwrite)", %{id: id} do
+      Application.put_env(:agentix, :audit, true)
+      on_exit(fn -> Application.delete_env(:agentix, :audit) end)
+      MockProvider.script([completion("one"), completion("two")])
+
+      {:ok, pid} = Conversation.ensure_started(id, config: config())
+      :ok = Conversation.send_message(id, "first", Scope.new())
+      assert_receive {:turn_completed, _r1}
+
+      # Kill the agent; the owner-held model_calls table survives it, and the
+      # transient supervisor revives a fresh process that rehydrates from the log.
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}
+
+      wait_until(fn ->
+        match?([{new_pid, _}] when new_pid != pid, Registry.lookup(Agentix.Registry, id))
+      end)
+
+      :ok = Conversation.send_message(id, "second", Scope.new())
+      assert_receive {:turn_completed, _r2}
+
+      # Without resuming the counter the second turn would reuse turn_ref 1 and clobber
+      # the first audit row; it must continue at 2.
+      assert [1, 2] == id |> Persistence.model_calls() |> Enum.map(& &1.turn_ref)
+    end
+  end
+
+  defp wait_until(fun, attempts \\ 50)
+  defp wait_until(_fun, 0), do: flunk("condition not met in time")
+
+  defp wait_until(fun, attempts) do
+    if !fun.() do
+      Process.sleep(5)
+      wait_until(fun, attempts - 1)
+    end
   end
 end

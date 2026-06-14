@@ -102,7 +102,8 @@ defmodule Agentix.Agent do
           conversation_id: conversation_id,
           config: config,
           publisher: Publisher.new(config, conversation_id),
-          last_seq: last_seq
+          last_seq: last_seq,
+          model_call_seq: last_model_call_seq(conversation_id, config)
         }
 
         {state, actions} = recover(events)
@@ -439,6 +440,20 @@ defmodule Agentix.Agent do
 
   defp audit?(%Config{audit?: true}), do: true
   defp audit?(_config), do: Application.get_env(:agentix, :audit, false)
+
+  # Restore the per-model-call counter on revival so audit rows keyed by `turn_ref`
+  # are appended after the pre-crash rows instead of overwriting them. Only the audit
+  # table is consulted, and only when audit is on (it is empty otherwise).
+  defp last_model_call_seq(conversation_id, config) do
+    if audit?(config) do
+      conversation_id
+      |> Persistence.model_calls()
+      |> Enum.map(& &1.turn_ref)
+      |> Enum.max(fn -> 0 end)
+    else
+      0
+    end
+  end
 
   ## Helpers
 
