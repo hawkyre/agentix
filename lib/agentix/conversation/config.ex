@@ -5,9 +5,9 @@ defmodule Agentix.Conversation.Config do
 
   The runtime knobs mirror the install/config contract:
 
-    * `working_budget` — token budget for the assembled context (`.docs/07`).
-    * `default_timeout` — suspension expiry default, in milliseconds (`.docs/03`).
-    * `audit?` — record `model_calls` for replay/evals (off by default, `.docs/04`).
+    * `working_budget` — token budget for the assembled context.
+    * `default_timeout` — suspension expiry default, in milliseconds.
+    * `audit?` — record `model_calls` for replay/evals (off by default).
     * `persistence` / `notifier` / `pubsub` — wiring resolved at runtime; `nil`
       falls back to the application-level configuration.
   """
@@ -24,7 +24,7 @@ defmodule Agentix.Conversation.Config do
           pubsub: atom() | nil
         }
 
-  # Default working-set token budget (~100–150 chat messages, see `.docs/07`).
+  # Default working-set token budget (~100–150 chat messages).
   @default_working_budget 30_000
   # Default suspension expiry, in milliseconds (5 minutes).
   @default_timeout_ms 300_000

@@ -2,7 +2,7 @@ defmodule Agentix.Executor do
   @moduledoc """
   The executor axis of a tool — who produces a tool call's result.
 
-  The set is closed and small (`.docs/03`):
+  The set is closed and small:
 
     * `:server` — your code runs it and returns a result (the default).
     * `:human` — the human is the executor; their answer is the result (elicitation).

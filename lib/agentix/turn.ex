@@ -1,6 +1,6 @@
 defmodule Agentix.Turn do
   @moduledoc """
-  The context object threaded through a turn's hook and tool pipeline (`.docs/02`).
+  The context object threaded through a turn's hook and tool pipeline.
 
   Hooks and `:server` tools receive and return this thin struct rather than a bare
   `ReqLLM.Context`, so ambient state (`scope`) lives in one place:

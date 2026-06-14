@@ -2,8 +2,7 @@ defmodule Agentix.Event do
   @moduledoc """
   A single entry in the canonical, append-only conversation log.
 
-  The log is the source of truth (`.docs/01`, `.docs/04`); everything else is
-  derived from it. `seq`, `conversation_id`, and `inserted_at` are assigned by the
+  The log is the source of truth; everything else is derived from it. `seq`, `conversation_id`, and `inserted_at` are assigned by the
   persistence layer on append — an in-memory event built with `new/2` carries them
   as `nil` until then.
 

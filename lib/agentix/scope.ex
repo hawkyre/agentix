@@ -4,7 +4,7 @@ defmodule Agentix.Scope do
 
   Carries the current user and any app-supplied `assigns`, and is the context
   argument `:server` tools and hooks receive. It is **not** persisted; it is
-  supplied per entry call (`.docs/04`). Timeout-driven resolutions run with the
+  supplied per entry call. Timeout-driven resolutions run with the
   documented system scope (`system/0`), which a tool needing a real user scope
   should reject rather than guess from.
   """
