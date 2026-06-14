@@ -39,6 +39,9 @@ defmodule Agentix.Agent do
   alias Agentix.Conversation.Config
   alias Agentix.Event
   alias Agentix.Events.Publisher
+  alias Agentix.Hook
+  alias Agentix.Hook.OverflowError
+  alias Agentix.Hook.Pipeline
   alias Agentix.Persistence
   alias Agentix.Provider
   alias Agentix.Scope
@@ -146,29 +149,17 @@ defmodule Agentix.Agent do
   ## State: preparing — assemble context and launch the streaming task
 
   def preparing(:internal, :assemble, data) do
-    context = assemble_context(data)
-    turn = data.turn
-    agent = self()
-    model = data.config.model
-    # Tools are handed to the provider for schema/serialization; the loop dispatches
-    # them itself (the provider never auto-executes). Other opts (temperature,
-    # max_tokens, pool config) are derived from config in a later increment.
-    opts = stream_opts(data.config)
+    base = assemble_context(data)
 
-    %{pid: pid, ref: ref} =
-      Task.Supervisor.async_nolink(Agentix.TaskSupervisor, fn ->
-        run_stream(agent, turn.ref, model, context, opts)
-      end)
+    # Pre-hooks run inline here (like context assembly itself); they inject context
+    # and may halt the turn before any model call. Injections land at the context tail.
+    case run_pre_hooks(data, build_hook_turn(data, base)) do
+      {:cont, %Turn{} = turn} ->
+        launch_stream(data, apply_injections(turn.context, turn.injections))
 
-    :telemetry.execute(
-      [:agentix, :turn, :start],
-      %{system_time: System.system_time()},
-      %{conversation_id: data.conversation_id, turn_ref: turn.ref}
-    )
-
-    data = put_in(data.turn, %{turn | task_pid: pid, monitor_ref: ref, context: context})
-    Publisher.state_changed(data.publisher, :streaming)
-    {:next_state, :streaming, data}
+      {:halt, reason} ->
+        halt_turn(data, reason)
+    end
   end
 
   def preparing({:call, from}, {:send_message, _m, _s}, _data) do
@@ -347,6 +338,49 @@ defmodule Agentix.Agent do
     {:next_state, :preparing, data, reply ++ [{:next_event, :internal, :assemble}]}
   end
 
+  # Spawn the monitored streaming task over the (post-injection) context and move to
+  # streaming. Split from `preparing` so the pre-hook pipeline sits cleanly before it.
+  defp launch_stream(data, context) do
+    turn = data.turn
+    agent = self()
+    model = data.config.model
+    # Tools are handed to the provider for schema/serialization; the loop dispatches
+    # them itself (the provider never auto-executes). Other opts (temperature,
+    # max_tokens, pool config) are derived from config in a later increment.
+    opts = stream_opts(data.config)
+    transformer = data.config.stream_transformer
+
+    %{pid: pid, ref: ref} =
+      Task.Supervisor.async_nolink(Agentix.TaskSupervisor, fn ->
+        run_stream(agent, turn.ref, model, context, opts, transformer)
+      end)
+
+    :telemetry.execute(
+      [:agentix, :turn, :start],
+      %{system_time: System.system_time()},
+      %{conversation_id: data.conversation_id, turn_ref: turn.ref}
+    )
+
+    data = put_in(data.turn, %{turn | task_pid: pid, monitor_ref: ref, context: context})
+    Publisher.state_changed(data.publisher, :streaming)
+    {:next_state, :streaming, data}
+  end
+
+  # A pre-hook halted (or crashed/overflowed): no model call happens, so no assistant
+  # message is recorded. The turn ends back at idle. (A dedicated `{:halted, ...}`
+  # live-event member is deferred — see the Inc 9 `:errored` carry-forward.)
+  defp halt_turn(data, reason) do
+    Logger.info("agentix turn halted by pre-hook: #{inspect(reason)}")
+
+    :telemetry.execute(
+      [:agentix, :turn, :halt],
+      %{},
+      %{conversation_id: data.conversation_id, turn_ref: data.turn.ref, reason: reason}
+    )
+
+    finish(data, :idle)
+  end
+
   defp complete_turn(message, usage, data) do
     turn = data.turn
     drop_monitor(turn)
@@ -356,9 +390,18 @@ defmodule Agentix.Agent do
 
     Publisher.message_completed(data.publisher, turn.ref, message)
 
-    case message.tool_calls do
-      [_ | _] = tool_calls -> begin_tool_calls(data, tool_calls)
-      _ -> finish_turn(data)
+    # Post-hooks run after the message finalizes. A :halt ends the turn (no further
+    # model calls); otherwise the tool-loop branch decides whether the turn continues.
+    case run_post_hooks(data, message) do
+      {:halt, reason} ->
+        Logger.info("agentix turn halted by post-hook: #{inspect(reason)}")
+        finish_turn(data)
+
+      {:cont, _turn} ->
+        case message.tool_calls do
+          [_ | _] = tool_calls -> begin_tool_calls(data, tool_calls)
+          _ -> finish_turn(data)
+        end
     end
   end
 
@@ -805,11 +848,17 @@ defmodule Agentix.Agent do
 
   ## Streaming task (runs under Agentix.TaskSupervisor)
 
-  defp run_stream(agent, turn_ref, model, context, opts) do
+  defp run_stream(agent, turn_ref, model, context, opts, transformer) do
     case Provider.stream(model, context, opts) do
       {:ok, stream} ->
         send(agent, {:stream_started, turn_ref, stream.cancel})
-        Enum.each(stream.chunks, fn chunk -> send(agent, {:chunk, turn_ref, chunk}) end)
+
+        # The stream-transformer seam (Inc 7): one `(chunk -> chunk)` pass per chunk
+        # (identity when unset), applied here at the provider seam before forwarding.
+        Enum.each(stream.chunks, fn chunk ->
+          send(agent, {:chunk, turn_ref, Hook.transform_chunk(chunk, transformer)})
+        end)
+
         {message, usage} = stream.finalize.()
         send(agent, {:stream_done, turn_ref, message, usage})
 
@@ -833,7 +882,81 @@ defmodule Agentix.Agent do
   # :tool_call chunks carry no id (harvested post-stream in Inc 6); :meta is noise.
   defp handle_chunk(_chunk, data), do: data
 
-  ## Context assembly (hooks/compaction plug in here — Inc 7/8)
+  ## Hook pipeline (Inc 7)
+
+  # Run the pre-pipeline, converting an overflow or a crash into a turn halt (rather
+  # than crashing the agent into a restart loop). The OverflowError is still *raised*
+  # by the pipeline — the loud signal lives there; the FSM only declines to crash.
+  defp run_pre_hooks(data, turn) do
+    Pipeline.run_pre(turn, pre_hooks(data.config), data.config.injection_reserve)
+  rescue
+    e in OverflowError ->
+      Logger.error("agentix pre-hook injection overflow: " <> Exception.message(e))
+      {:halt, {:injection_overflow, e.hook}}
+
+    e ->
+      Logger.error("agentix pre-hook crashed: " <> Exception.message(e))
+      {:halt, {:hook_crashed, e}}
+  end
+
+  # Post-hooks are side-effecting; a crash must not unwind an already-completed turn,
+  # so a crash is logged and treated as `:cont`.
+  defp run_post_hooks(data, message) do
+    case post_hooks(data.config) do
+      [] -> {:cont, nil}
+      hooks -> Pipeline.run_post(build_post_turn(data, message), hooks)
+    end
+  rescue
+    e ->
+      Logger.error("agentix post-hook crashed: " <> Exception.message(e))
+      {:cont, nil}
+  end
+
+  defp pre_hooks(%Config{hooks: hooks}), do: Enum.filter(hooks, &(&1.phase == :pre))
+  defp post_hooks(%Config{hooks: hooks}), do: Enum.filter(hooks, &(&1.phase == :post))
+
+  defp build_hook_turn(data, context) do
+    Turn.new(
+      context: context,
+      user_message: last_user_message(context),
+      turn_ref: data.turn.ref,
+      scope: data.turn.scope
+    )
+  end
+
+  defp build_post_turn(data, message) do
+    Turn.new(
+      context: data.turn.context,
+      assistant_message: message,
+      turn_ref: data.turn.ref,
+      scope: data.turn.scope
+    )
+  end
+
+  defp last_user_message(%Context{messages: messages}) do
+    Enum.find(Enum.reverse(messages), &match?(%Message{role: :user}, &1))
+  end
+
+  # Place pre-hook injections at the context tail (cache-prefix safety, D7): append
+  # them to the final user message's content when there is one (keeping the tail a
+  # single user message), else as a trailing user message (e.g. a tool-loop step).
+  defp apply_injections(context, []), do: context
+
+  defp apply_injections(%Context{messages: messages} = context, injections) do
+    %{context | messages: place_injections(messages, injections)}
+  end
+
+  defp place_injections(messages, injections) do
+    case List.last(messages) do
+      %Message{role: :user, content: content} = last ->
+        List.replace_at(messages, -1, %{last | content: content ++ injections})
+
+      _ ->
+        messages ++ [%Message{role: :user, content: injections}]
+    end
+  end
+
+  ## Context assembly (compaction plugs in here — Inc 8)
 
   defp assemble_context(data) do
     history =

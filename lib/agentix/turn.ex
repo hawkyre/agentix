@@ -7,6 +7,11 @@ defmodule Agentix.Turn do
   this turn. The scope is **enforced** — a turn always carries one (system scope for
   timeout/recovery-driven turns).
 
+  Two fields serve the hook pipeline (Inc 7): `injections` accumulates the
+  `ContentPart`s a pre-hook adds (appended at the context tail at assembly time, via
+  `Agentix.Hook.inject/2`), and `assistant_message` carries the finalized message to a
+  post-hook (`nil` for pre-hooks and tool callbacks).
+
   Built with `new/1`; rejects unknown keys.
   """
 
@@ -15,12 +20,19 @@ defmodule Agentix.Turn do
   @type t :: %__MODULE__{
           context: ReqLLM.Context.t() | nil,
           user_message: ReqLLM.Message.t() | nil,
+          assistant_message: ReqLLM.Message.t() | nil,
           turn_ref: term(),
-          scope: Scope.t()
+          scope: Scope.t(),
+          injections: [ReqLLM.Message.ContentPart.t()]
         }
 
   @enforce_keys [:scope]
-  defstruct context: nil, user_message: nil, turn_ref: nil, scope: nil
+  defstruct context: nil,
+            user_message: nil,
+            assistant_message: nil,
+            turn_ref: nil,
+            scope: nil,
+            injections: []
 
   @doc """
   Builds a turn from `attrs`. Requires a `%Agentix.Scope{}` under `:scope`. Raises
