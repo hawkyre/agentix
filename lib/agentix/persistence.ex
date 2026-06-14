@@ -37,22 +37,91 @@ defmodule Agentix.Persistence do
   @type tool_call :: map()
   @type model_call :: map()
 
+  @doc """
+  Appends `event` to the conversation log, assigning the next per-conversation
+  `seq` (monotonic, 1-based). Returns the assigned `seq`. Implementations must keep
+  `seq` strictly increasing per conversation; concurrent appends to the *same*
+  conversation are not expected (one agent writes per conversation).
+  """
   @callback append_event(conversation_id(), Event.t()) :: {:ok, seq()} | {:error, term()}
+
+  @doc """
+  Returns the conversation's events ordered by ascending `seq`. Options: `:after`
+  (exclusive `seq` lower bound, default 0) and `:limit` (max events).
+  """
   @callback stream_events(conversation_id(), keyword()) :: [Event.t()]
+
+  @doc """
+  Revival read: returns `{latest_summary_or_nil, events_after_that_summary}`. With
+  no summary, returns `{nil, all_events}`. This is how a revived agent rebuilds its
+  working set without replaying from `seq` 1.
+  """
   @callback load_since(conversation_id()) :: {summary() | nil, [Event.t()]}
+
+  @doc "Returns the conversation record (`%{id, settings, status, fsm_state}`) or `nil`."
   @callback get_conversation(conversation_id()) :: conversation() | nil
+
+  @doc "Upserts the conversation record, merging `attrs` (`:settings`, `:status`, `:fsm_state`)."
   @callback put_conversation(conversation_id(), map()) :: :ok
+
+  @doc """
+  Upserts just the `fsm_state` cache (`%{state, pending, last_seq}`), creating the
+  conversation row if absent. `fsm_state` is a cache over the log, never the source
+  of truth.
+  """
   @callback put_fsm_state(conversation_id(), map()) :: :ok
+
+  @doc """
+  Inserts or replaces a tool-call record (keyed by its `tool_call_id`). Used to
+  track HITL suspensions so they survive a kill. New records default to
+  `status: :pending`.
+  """
   @callback upsert_tool_call(conversation_id(), tool_call()) :: :ok
+
+  @doc "Returns the tool-call record for `tool_call_id`, or `nil`."
   @callback get_tool_call(tool_call_id()) :: tool_call() | nil
+
+  @doc "Returns the conversation's tool calls currently in `:pending` status."
   @callback pending_tool_calls(conversation_id()) :: [tool_call()]
+
+  @doc """
+  Atomically resolves a tool call **only if it is currently `:pending`**, setting
+  its `status` and `result`. Returns `{:error, :stale}` if the id is unknown or
+  already resolved/expired — this is what makes double-clicks, resubmits, and the
+  kill→revive→late-answer race safe. Implementations must guarantee atomicity
+  against concurrent resolvers.
+  """
   @callback resolve_tool_call(tool_call_id(), atom(), map() | nil) :: :ok | {:error, :stale}
+
+  @doc "Returns the summary with the greatest `to_seq` for the conversation, or `nil`."
   @callback latest_summary(conversation_id()) :: summary() | nil
+
+  @doc "Stores a derived compaction summary (keyed by its `to_seq`)."
   @callback put_summary(conversation_id(), summary()) :: :ok
+
+  @doc """
+  Schedules `tool_call_id` to be resolved to a tool-error after `timeout_ms` if it
+  is still pending. Owned by the adapter (not a per-agent timer) so it survives the
+  agent being killed. Rescheduling the same call replaces the prior timer.
+  """
   @callback schedule_expiry(conversation_id(), tool_call_id(), pos_integer()) :: :ok
+
+  @doc "Cancels a pending expiry scheduled by `schedule_expiry/3`."
   @callback cancel_expiry(conversation_id(), tool_call_id()) :: :ok
+
+  @doc """
+  Records a `model_call` audit row (exactly what was rendered to the model that
+  turn). **A no-op unless the audit flag is enabled** (`config :agentix, :audit`).
+  """
   @callback put_model_call(conversation_id(), model_call()) :: :ok
+
+  @doc "Returns the conversation's audit rows ordered by `turn_ref` (empty when audit is off)."
   @callback model_calls(conversation_id()) :: [model_call()]
+
+  @doc """
+  Deletes audit rows older than `ttl_ms` (relative to now) for the conversation,
+  returning the count removed. Used for TTL-based GC of the audit table.
+  """
   @callback gc_model_calls(conversation_id(), non_neg_integer()) :: {:ok, non_neg_integer()}
 
   @default_adapter Agentix.Persistence.ETS
