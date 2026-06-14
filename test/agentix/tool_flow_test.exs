@@ -1,3 +1,20 @@
+defmodule Agentix.ToolFlowTest.ScriptProvider do
+  @moduledoc false
+  # Pops a prebuilt %ReqLLM.Message{} per stream call — lets a test inject a
+  # raw/malformed tool call the scriptable mock can't express.
+  @behaviour Agentix.Provider
+
+  def start_link(messages), do: Agent.start_link(fn -> messages end, name: __MODULE__)
+
+  @impl true
+  def stream(_model, _context, _opts) do
+    message = Agent.get_and_update(__MODULE__, fn [h | t] -> {h, t} end)
+
+    {:ok,
+     %Agentix.Provider.Stream{chunks: [], cancel: fn -> :ok end, finalize: fn -> {message, %{}} end}}
+  end
+end
+
 defmodule Agentix.ToolFlowTest do
   use ExUnit.Case, async: false
 
@@ -11,6 +28,10 @@ defmodule Agentix.ToolFlowTest do
   alias Agentix.Scope
   alias Agentix.Test.MockProvider
   alias Agentix.Tool
+  alias Agentix.ToolFlowTest.ScriptProvider
+  alias ReqLLM.Message
+  alias ReqLLM.Message.ContentPart
+  alias ReqLLM.ToolCall
 
   setup do
     install_mock_provider()
@@ -179,6 +200,26 @@ defmodule Agentix.ToolFlowTest do
       assert final_assistant_text(id) == "aborted"
     end
 
+    test "the approver's scope (not the sender's) reaches the dispatched callback", %{id: id} do
+      deploy =
+        Tool.new(
+          name: "whoami",
+          executor: :server,
+          approval: :requires_approval,
+          callback: fn _args, turn -> {:ok, turn.scope.current_user} end
+        )
+
+      MockProvider.script([completion("", tool_calls: [{"whoami", %{}}]), completion("done")])
+
+      {:ok, _pid} = Conversation.ensure_started(id, config: config([deploy]))
+      :ok = Conversation.send_message(id, "go", Scope.new(current_user: "sender"))
+
+      assert_receive {:suspended, tid, :server, %{kind: :approval}}
+      assert :ok = Agentix.resolve(id, tid, :approve, Scope.new(current_user: "approver"))
+      assert_receive {:turn_completed, _ref}
+      assert tool_result(id, "whoami") == %{ok: true, result: "approver"}
+    end
+
     test "gated :client double-suspends: approval, then client exec", %{id: id} do
       geo = Tool.new(name: "geo", executor: :client, approval: :requires_approval)
       MockProvider.script([completion("", tool_calls: [{"geo", %{}}]), completion("located")])
@@ -212,6 +253,31 @@ defmodule Agentix.ToolFlowTest do
       assert_receive {:turn_completed, _ref}, 500
       assert %{ok: false} = tool_result(id, "ask")
       assert final_assistant_text(id) == "gave up"
+    end
+  end
+
+  describe "robustness" do
+    test "malformed tool arguments record an error result instead of crashing the agent", %{id: id} do
+      Application.put_env(:agentix, :provider, ScriptProvider)
+
+      {:ok, _} =
+        ScriptProvider.start_link([
+          %Message{
+            role: :assistant,
+            content: [],
+            tool_calls: [ToolCall.new("call_bad", "echo", "not json")]
+          },
+          %Message{role: :assistant, content: [ContentPart.text("recovered")]}
+        ])
+
+      {:ok, pid} = Conversation.ensure_started(id, config: config([]))
+      :ok = Conversation.send_message(id, "go", Scope.new())
+
+      assert_receive {:tool_call_errored, "call_bad", %{ok: false}}
+      assert_receive {:turn_completed, _ref}
+      assert Process.alive?(pid)
+      assert %{ok: false, error: "invalid tool arguments"} = tool_result(id, "echo")
+      assert final_assistant_text(id) == "recovered"
     end
   end
 end

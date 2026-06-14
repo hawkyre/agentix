@@ -69,11 +69,6 @@ defmodule Agentix.Tool do
     tool
   end
 
-  @doc "Returns `true` if the call must suspend and await an external resolution."
-  @spec suspends?(t()) :: boolean()
-  def suspends?(%__MODULE__{approval: :requires_approval}), do: true
-  def suspends?(%__MODULE__{executor: executor}), do: executor in [:human, :client]
-
   @doc """
   The renderer `kind` for the call's *current* pending phase: `:approval` when gated
   (the first suspension), else `:elicitation` for `:human` / `:client_exec` for

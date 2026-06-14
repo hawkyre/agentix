@@ -450,29 +450,38 @@ defmodule Agentix.Agent do
   # The assistant message carried tool calls. Record each as a `:tool_call` event,
   # start it per its executor, then pick the next state.
   defp begin_tool_calls(data, tool_calls) do
-    data
-    |> then(fn d ->
-      Enum.reduce(tool_calls, d, fn tool_call, acc -> begin_one_call(acc, tool_call) end)
-    end)
-    |> advance()
+    data = Enum.reduce(tool_calls, data, fn tool_call, acc -> begin_one_call(acc, tool_call) end)
+    advance(data)
   end
 
   defp begin_one_call(data, %ReqLLM.ToolCall{id: id, function: function}) do
     name = function["name"] || function[:name]
-    args = parse_args(function["arguments"] || function[:arguments])
 
-    {:ok, seq} =
-      append_event(data, :tool_call, %{"tool_call_id" => id, "name" => name, "args" => args})
+    case parse_args(function["arguments"] || function[:arguments]) do
+      {:ok, args} ->
+        {:ok, seq} =
+          append_event(data, :tool_call, %{"tool_call_id" => id, "name" => name, "args" => args})
 
-    tool = find_tool(data.config, name)
-    start_call(%{data | last_seq: seq}, id, name, tool, args)
+        tool = find_tool(data.config, name)
+        start_call(%{data | last_seq: seq}, id, name, tool, args)
+
+      :error ->
+        # The model emitted unparseable arguments. Don't crash the agent — record an
+        # error result so the call/result pair stays intact and the model can retry.
+        {:ok, seq} =
+          append_event(data, :tool_call, %{"tool_call_id" => id, "name" => name, "args" => %{}})
+
+        %{data | last_seq: seq}
+        |> update_call(id, call_entry(nil, name, %{}, :done))
+        |> do_record_result(id, %{ok: false, error: "invalid tool arguments"})
+    end
   end
 
   # Unknown tool the model hallucinated — record an error result so the call/result
   # pair stays intact (providers reject orphan tool_calls).
   defp start_call(data, id, name, nil, args) do
     data
-    |> put_call(id, call_entry(nil, name, args, :done))
+    |> update_call(id, call_entry(nil, name, args, :done))
     |> do_record_result(id, %{ok: false, error: "unknown tool: #{name}"})
   end
 
@@ -480,7 +489,7 @@ defmodule Agentix.Agent do
   # dispatches it locally (full provider-tool round-trip is post-v0).
   defp start_call(data, id, name, %Tool{executor: :provider} = tool, args) do
     data
-    |> put_call(id, call_entry(tool, name, args, :done))
+    |> update_call(id, call_entry(tool, name, args, :done))
     |> do_record_result(id, %{ok: true, result: nil})
   end
 
@@ -488,8 +497,11 @@ defmodule Agentix.Agent do
   # `{:tool_done, ...}`. A running server call is internal — not a persisted pending.
   defp start_call(data, id, name, %Tool{executor: :server, approval: :auto} = tool, args) do
     Publisher.tool_call_started(data.publisher, id, name, :server, args)
-    task = Dispatch.run_server(self(), data.turn.ref, id, tool, args, build_turn(data))
-    put_call(data, id, call_entry(tool, name, args, :running, task: task))
+
+    task =
+      Dispatch.run_server(self(), data.turn.ref, id, tool, args, build_turn(data, data.turn.scope))
+
+    update_call(data, id, call_entry(tool, name, args, :running, task: task))
   end
 
   # Everything else suspends and awaits an external resolution: gated `:server` /
@@ -514,15 +526,17 @@ defmodule Agentix.Agent do
     Publisher.tool_call_started(data.publisher, id, name, tool.executor, args)
     Publisher.suspended(data.publisher, id, tool.executor, %{kind: kind, args: args})
     timer = arm_timeout(data, id)
-    put_call(data, id, call_entry(tool, name, args, phase, timer: timer))
+    update_call(data, id, call_entry(tool, name, args, phase, timer: timer))
   end
 
   # Resolution arrived for a pending call. Reply `:ok` immediately, then advance.
-  defp handle_resolve(data, from, id, result, _scope) do
+  # `scope` is the resolver's (e.g. the approver), threaded into a post-approval
+  # `:server` dispatch so the callback runs as whoever authorized it.
+  defp handle_resolve(data, from, id, result, scope) do
     case current_call(data, id) do
       %{phase: phase} = call when phase in [:awaiting_approval, :awaiting_exec, :awaiting_human] ->
         data
-        |> apply_resolution(id, call, result)
+        |> apply_resolution(id, call, result, scope)
         |> advance()
         |> with_reply(from, :ok)
 
@@ -532,38 +546,34 @@ defmodule Agentix.Agent do
   end
 
   # Gated call: approve transitions to the executor's real phase; deny resolves it.
-  defp apply_resolution(data, id, %{phase: :awaiting_approval, tool: tool} = call, result) do
-    cancel_timer(call.timer)
-
+  defp apply_resolution(data, id, %{phase: :awaiting_approval, tool: tool}, result, scope) do
     if approved?(result) do
-      approve_call(data, id, tool)
+      approve_call(data, id, tool, scope)
     else
       do_record_result(data, id, %{ok: false, error: "denied by approver"})
     end
   end
 
-  # Client returned its execution output; the answer is the result.
-  defp apply_resolution(data, id, %{phase: :awaiting_exec}, result) do
+  # Client exec output or human elicitation answer — the resolution value is the result.
+  defp apply_resolution(data, id, _call, result, _scope) do
     do_record_result(data, id, Dispatch.normalize_result(result))
   end
 
-  # Human elicitation: the answer *is* the result.
-  defp apply_resolution(data, id, %{phase: :awaiting_human}, result) do
-    do_record_result(data, id, Dispatch.normalize_result(result))
-  end
-
-  defp approve_call(data, id, %Tool{executor: :server} = tool) do
-    # No longer awaiting external input; clear the durable pending record, then run.
-    Persistence.resolve_tool_call(id, :resolved, %{approved: true})
+  defp approve_call(data, id, %Tool{executor: :server} = tool, scope) do
+    # No longer awaiting external input; clear the durable pending record, then run
+    # the callback as the approver.
     call = current_call(data, id)
+    cancel_timer(call.timer)
+    Persistence.resolve_tool_call(id, :resolved, %{approved: true})
     Publisher.tool_call_started(data.publisher, id, call.name, :server, call.args)
-    task = Dispatch.run_server(self(), data.turn.ref, id, tool, call.args, build_turn(data))
+    task = Dispatch.run_server(self(), data.turn.ref, id, tool, call.args, build_turn(data, scope))
     update_call(data, id, %{call | phase: :running, task: task, timer: nil})
   end
 
-  defp approve_call(data, id, %Tool{executor: :client}) do
+  defp approve_call(data, id, %Tool{executor: :client}, _scope) do
     # Gated client: second suspension for the actual client execution.
     call = current_call(data, id)
+    cancel_timer(call.timer)
     Publisher.suspended(data.publisher, id, :client, %{kind: :client_exec, args: call.args})
     timer = arm_timeout(data, id)
     update_call(data, id, %{call | phase: :awaiting_exec, timer: timer})
@@ -672,8 +682,6 @@ defmodule Agentix.Agent do
     }
   end
 
-  defp put_call(data, id, entry), do: update_call(data, id, entry)
-
   defp update_call(data, id, entry) do
     %{data | turn: %{data.turn | calls: Map.put(data.turn.calls, id, entry)}}
   end
@@ -703,15 +711,24 @@ defmodule Agentix.Agent do
     end
   end
 
-  defp build_turn(data) do
-    Turn.new(context: data.turn.context, turn_ref: data.turn.ref, scope: data.turn.scope)
+  defp build_turn(data, scope) do
+    Turn.new(context: data.turn.context, turn_ref: data.turn.ref, scope: scope)
   end
 
   defp find_tool(%Config{tools: tools}, name), do: Enum.find(tools, &(&1.name == name))
 
-  defp parse_args(args) when is_map(args), do: args
-  defp parse_args(json) when is_binary(json) and json != "", do: Jason.decode!(json)
-  defp parse_args(_other), do: %{}
+  # Returns `{:ok, map}` or `:error` — model-supplied arguments must never crash the
+  # agent (this runs in the agent process, after the stream already finished).
+  defp parse_args(args) when is_map(args), do: {:ok, args}
+
+  defp parse_args(json) when is_binary(json) and json != "" do
+    case Jason.decode(json) do
+      {:ok, map} when is_map(map) -> {:ok, map}
+      _ -> :error
+    end
+  end
+
+  defp parse_args(_other), do: {:ok, %{}}
 
   defp approved?(:approve), do: true
   defp approved?(%{approved: value}), do: value == true
@@ -748,15 +765,20 @@ defmodule Agentix.Agent do
 
       {id, call}, acc ->
         cancel_timer(call.timer)
-
-        if match?(%Task{}, call.task),
-          do: Task.Supervisor.terminate_child(Agentix.TaskSupervisor, call.task.pid)
-
+        shutdown_task(call.task)
         do_record_result(acc, id, %{ok: false, error: "[cancelled]"})
     end)
   end
 
   defp cancel_tool_calls(data), do: data
+
+  # Terminate a running tool task and release its monitor so no stray `:DOWN` lingers.
+  defp shutdown_task(%Task{pid: pid, ref: ref}) do
+    Process.demonitor(ref, [:flush])
+    Task.Supervisor.terminate_child(Agentix.TaskSupervisor, pid)
+  end
+
+  defp shutdown_task(_no_task), do: :ok
 
   ## Streaming task (runs under Agentix.TaskSupervisor)
 
