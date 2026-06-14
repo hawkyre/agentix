@@ -94,7 +94,7 @@ defmodule Agentix.Agent do
 
     case resolve_config(conversation_id, opts) do
       {:ok, config} ->
-        Persistence.put_conversation(conversation_id, %{settings: settings_of(config)})
+        Persistence.put_conversation(conversation_id, %{settings: Map.from_struct(config)})
         {summary, events} = Persistence.load_since(conversation_id)
         last_seq = max_seq(summary, events)
 
@@ -123,8 +123,10 @@ defmodule Agentix.Agent do
     {:keep_state_and_data, [{:reply, from, :ok}]}
   end
 
-  def idle(:internal, {:rerun, message, scope}, data) do
-    start_turn(message, scope, data, nil)
+  # Recovery rerun: the user message is already in the log (only the LLM dispatch
+  # was lost), so we re-launch the turn without re-appending it.
+  def idle(:internal, {:rerun, scope}, data) do
+    launch_turn(scope, data, nil)
   end
 
   def idle(event_type, event, data), do: handle_common(:idle, event_type, event, data)
@@ -136,7 +138,9 @@ defmodule Agentix.Agent do
     turn = data.turn
     agent = self()
     model = data.config.model
-    opts = stream_opts(data.config)
+    # Provider opts (temperature, max_tokens, pool config) are derived from config
+    # in a later increment; the stream is started bare in v0.
+    opts = []
 
     %{pid: pid, ref: ref} =
       Task.Supervisor.async_nolink(Agentix.TaskSupervisor, fn ->
@@ -207,10 +211,9 @@ defmodule Agentix.Agent do
 
   ## Shared handlers
 
-  # Stale messages from a superseded turn (different ref) are dropped — the mailbox
-  # may still hold chunks from a turn that was cancelled.
-  defp handle_common(_state, :info, {tag, _ref, _a, _b}, _data)
-       when tag in [:stream_started, :chunk, :stream_done, :stream_error] do
+  # Stale stream messages from a superseded/cancelled turn (ref no longer current)
+  # are dropped. `:stream_done` is the only 4-tuple; the rest are 3-tuples.
+  defp handle_common(_state, :info, {:stream_done, _ref, _msg, _usage}, _data) do
     :keep_state_and_data
   end
 
@@ -227,10 +230,14 @@ defmodule Agentix.Agent do
 
   ## Turn lifecycle
 
+  # A fresh user message: append it to the log, then launch the turn. The turn
+  # assembles its context by reading the log, so the message is not threaded further.
   defp start_turn(message, scope, data, from) do
-    user_message = normalize_user_message(message)
-    {:ok, seq} = append_event(data, :user_msg, message_content(user_message))
+    {:ok, seq} = append_event(data, :user_msg, message_content(normalize_user_message(message)))
+    launch_turn(scope, %{data | last_seq: seq}, from)
+  end
 
+  defp launch_turn(scope, data, from) do
     turn = %{
       ref: make_ref(),
       msg_id: new_msg_id(),
@@ -243,7 +250,7 @@ defmodule Agentix.Agent do
       thinking: ""
     }
 
-    data = %{data | last_seq: seq, turn: turn}
+    data = %{data | turn: turn}
     Publisher.turn_started(data.publisher, turn.ref)
     Publisher.state_changed(data.publisher, :preparing)
 
@@ -253,6 +260,7 @@ defmodule Agentix.Agent do
 
   defp complete_turn(message, usage, data) do
     turn = data.turn
+    drop_monitor(turn)
     message = put_msg_id(message, turn.msg_id)
     {:ok, seq} = append_event(data, :assistant_msg, message_content(message))
     data = maybe_audit(%{data | last_seq: seq}, message, usage)
@@ -273,6 +281,7 @@ defmodule Agentix.Agent do
   # receive (if any) so the log keeps a faithful assistant turn, then return to idle.
   defp fail_turn(reason, data) do
     turn = data.turn
+    drop_monitor(turn)
     Logger.warning("agentix stream failed: #{inspect(reason)}")
 
     data = record_partial(data, " [stream error]")
@@ -292,7 +301,7 @@ defmodule Agentix.Agent do
   defp abort_turn(data, from) do
     turn = data.turn
 
-    if turn.monitor_ref, do: Process.demonitor(turn.monitor_ref, [:flush])
+    drop_monitor(turn)
     if turn.task_pid, do: Task.Supervisor.terminate_child(Agentix.TaskSupervisor, turn.task_pid)
     if is_function(turn.cancel, 0), do: turn.cancel.()
 
@@ -332,6 +341,13 @@ defmodule Agentix.Agent do
     {:next_state, state, %{data | turn: nil}}
   end
 
+  # Release the streaming task's monitor and flush any pending `:DOWN` so it does not
+  # linger in the mailbox after the turn ends.
+  defp drop_monitor(%{monitor_ref: ref}) when is_reference(ref),
+    do: Process.demonitor(ref, [:flush])
+
+  defp drop_monitor(_turn), do: :ok
+
   ## Streaming task (runs under Agentix.TaskSupervisor)
 
   defp run_stream(agent, turn_ref, model, context, opts) do
@@ -347,13 +363,13 @@ defmodule Agentix.Agent do
     end
   end
 
-  defp handle_chunk(%{type: :content, text: text} = _chunk, data) when is_binary(text) do
+  defp handle_chunk(%{type: :content, text: text}, data) when is_binary(text) do
     turn = data.turn
     Publisher.text_delta(data.publisher, turn.ref, turn.msg_id, text)
     put_in(data.turn.text, turn.text <> text)
   end
 
-  defp handle_chunk(%{type: :thinking, text: text} = _chunk, data) when is_binary(text) do
+  defp handle_chunk(%{type: :thinking, text: text}, data) when is_binary(text) do
     turn = data.turn
     Publisher.thinking_delta(data.publisher, turn.ref, turn.msg_id, text)
     put_in(data.turn.thinking, turn.thinking <> text)
@@ -387,13 +403,15 @@ defmodule Agentix.Agent do
 
   ## Recovery
 
+  # A log ending in a `:user_msg` was killed after recording the message but before
+  # the assistant reply — re-run the turn under the system scope. Any other tail is
+  # already resolved (or handled by Inc 6 for dangling tool calls).
   defp recover([]), do: {:idle, []}
 
   defp recover(events) do
     case List.last(events) do
-      %Event{type: :user_msg, content: content} ->
-        message = Codec.decode_message(content["message"] || content[:message])
-        {:idle, [{:next_event, :internal, {:rerun, message, Agentix.Scope.system()}}]}
+      %Event{type: :user_msg} ->
+        {:idle, [{:next_event, :internal, {:rerun, Agentix.Scope.system()}}]}
 
       _ ->
         {:idle, []}
@@ -455,12 +473,10 @@ defmodule Agentix.Agent do
     max(event_max, summary_to)
   end
 
-  defp stream_opts(%Config{} = _config), do: []
-
-  defp resolve_config(_conversation_id, opts) when is_list(opts) do
+  defp resolve_config(conversation_id, opts) do
     case Keyword.get(opts, :config) do
       %Config{} = config -> {:ok, config}
-      nil -> resolve_config_from_settings(Keyword.fetch!(opts, :conversation_id))
+      nil -> resolve_config_from_settings(conversation_id)
     end
   end
 
@@ -473,6 +489,4 @@ defmodule Agentix.Agent do
         :error
     end
   end
-
-  defp settings_of(%Config{} = config), do: Map.from_struct(config)
 end

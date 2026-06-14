@@ -168,6 +168,9 @@ defmodule Agentix.ConversationTest do
       assert_receive {:message_completed, _ref, %Message{}}
       assert_receive {:turn_completed, _ref}
       assert assistant_text(id) == "recovered"
+
+      # The seeded user_msg must NOT be re-appended on rerun — exactly one of each.
+      assert [%{type: :user_msg}, %{type: :assistant_msg}] = Persistence.stream_events(id)
     end
 
     test "send_message for an unknown conversation without config errors", %{id: id} do

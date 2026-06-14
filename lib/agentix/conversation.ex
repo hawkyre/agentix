@@ -12,7 +12,6 @@ defmodule Agentix.Conversation do
   """
 
   alias Agentix.Agent
-  alias Agentix.Conversation.Config
   alias Agentix.Scope
 
   @typedoc "A user message — plain text or a prebuilt `ReqLLM.Message`."
@@ -58,17 +57,23 @@ defmodule Agentix.Conversation do
     spec = {Agent, [{:conversation_id, conversation_id} | opts]}
 
     case DynamicSupervisor.start_child(Agentix.ConversationSupervisor, spec) do
-      {:ok, pid} -> {:ok, pid}
-      {:ok, pid, _info} -> {:ok, pid}
-      {:error, {:already_started, pid}} -> {:ok, pid}
-      {:error, {:shutdown, :unknown_conversation}} -> {:error, :unknown_conversation}
-      {:error, :unknown_conversation} -> {:error, :unknown_conversation}
-      :ignore -> {:error, :ignore}
-      {:error, reason} -> {:error, reason}
+      {:ok, pid} ->
+        {:ok, pid}
+
+      {:ok, pid, _info} ->
+        {:ok, pid}
+
+      {:error, {:already_started, pid}} ->
+        {:ok, pid}
+
+      {:error, reason} when reason in [:unknown_conversation, {:shutdown, :unknown_conversation}] ->
+        {:error, :unknown_conversation}
+
+      :ignore ->
+        {:error, :ignore}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
-
-  @doc false
-  @spec config(keyword() | map()) :: Config.t()
-  def config(attrs), do: Config.new(attrs)
 end
