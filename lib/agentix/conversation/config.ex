@@ -24,13 +24,18 @@ defmodule Agentix.Conversation.Config do
           pubsub: atom() | nil
         }
 
+  # Default working-set token budget (~100–150 chat messages, see `.docs/07`).
+  @default_working_budget 30_000
+  # Default suspension expiry, in milliseconds (5 minutes).
+  @default_timeout_ms 300_000
+
   @enforce_keys [:model]
   defstruct [
     :model,
     system_prompt: nil,
     tools: [],
-    working_budget: 30_000,
-    default_timeout: 300_000,
+    working_budget: @default_working_budget,
+    default_timeout: @default_timeout_ms,
     audit?: false,
     persistence: nil,
     notifier: nil,
