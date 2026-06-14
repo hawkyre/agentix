@@ -10,8 +10,9 @@ defmodule Agentix.Turn do
     * `turn_ref` — correlates live events and the optional audit record.
     * `scope` — an `Agentix.Scope` (current user, etc.).
 
-  `context` and `user_message` are held opaquely here to avoid coupling the core
-  type to ReqLLM struct internals; the agent populates them with ReqLLM values.
+  Always build with `new/1`, which guarantees a `scope` is present (the field is
+  enforced). `context` and `user_message` are held opaquely to avoid coupling the
+  core type to ReqLLM struct internals; the agent populates them with ReqLLM values.
   """
 
   alias Agentix.Scope
@@ -23,20 +24,18 @@ defmodule Agentix.Turn do
           scope: Scope.t()
         }
 
-  defstruct context: nil, user_message: nil, turn_ref: nil, scope: nil
+  @enforce_keys [:scope]
+  defstruct [:scope, context: nil, user_message: nil, turn_ref: nil]
 
   @doc """
-  Builds a turn from `attrs`. `:scope` defaults to a fresh `Agentix.Scope`.
+  Builds a turn from `attrs`. `:scope` defaults to a fresh `Agentix.Scope`; a
+  `nil` scope is replaced by the default so a turn always carries one. Raises
+  `ArgumentError` on unknown keys.
   """
   @spec new(keyword() | map()) :: t()
   def new(attrs \\ []) do
     attrs = Map.new(attrs)
-
-    %__MODULE__{
-      context: Map.get(attrs, :context),
-      user_message: Map.get(attrs, :user_message),
-      turn_ref: Map.get(attrs, :turn_ref),
-      scope: Map.get(attrs, :scope) || Scope.new()
-    }
+    scope = Map.get(attrs, :scope) || Scope.new()
+    struct!(__MODULE__, Map.put(attrs, :scope, scope))
   end
 end

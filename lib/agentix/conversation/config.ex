@@ -38,26 +38,31 @@ defmodule Agentix.Conversation.Config do
   ]
 
   @doc """
-  Builds a config from `attrs`. Requires `:model`; raises `ArgumentError` if it is
-  missing.
+  Builds a config from `attrs`. Requires a non-empty `:model` string. Raises
+  `ArgumentError` if `:model` is missing/blank, if `working_budget` or
+  `default_timeout` is not a positive integer, or on unknown keys.
   """
   @spec new(keyword() | map()) :: t()
   def new(attrs) do
     attrs = Map.new(attrs)
+    validate_model!(Map.get(attrs, :model))
 
-    model =
-      Map.get(attrs, :model) || raise ArgumentError, "Agentix.Conversation.Config requires :model"
+    config = struct!(__MODULE__, attrs)
+    validate_positive!(:working_budget, config.working_budget)
+    validate_positive!(:default_timeout, config.default_timeout)
+    config
+  end
 
-    %__MODULE__{
-      model: model,
-      system_prompt: Map.get(attrs, :system_prompt),
-      tools: Map.get(attrs, :tools, []),
-      working_budget: Map.get(attrs, :working_budget, 30_000),
-      default_timeout: Map.get(attrs, :default_timeout, 300_000),
-      audit?: Map.get(attrs, :audit?, false),
-      persistence: Map.get(attrs, :persistence),
-      notifier: Map.get(attrs, :notifier),
-      pubsub: Map.get(attrs, :pubsub)
-    }
+  defp validate_model!(model) when is_binary(model) and model != "", do: :ok
+
+  defp validate_model!(other) do
+    raise ArgumentError,
+          "Agentix.Conversation.Config requires a non-empty :model string, got: #{inspect(other)}"
+  end
+
+  defp validate_positive!(_field, value) when is_integer(value) and value > 0, do: :ok
+
+  defp validate_positive!(field, value) do
+    raise ArgumentError, "#{field} must be a positive integer, got: #{inspect(value)}"
   end
 end

@@ -27,7 +27,7 @@ defmodule Agentix.Event do
   @enforce_keys [:type, :content]
   defstruct [:type, :content, :seq, :conversation_id, :inserted_at]
 
-  @doc "All valid event types."
+  @doc "All valid event types, in canonical order."
   @spec types() :: [type()]
   def types, do: @types
 
@@ -38,9 +38,10 @@ defmodule Agentix.Event do
   @doc """
   Builds an event of `type` carrying `content` (a map).
 
-  Optional `:seq`, `:conversation_id`, and `:inserted_at` may be supplied; the
-  persistence layer normally assigns them. Raises `ArgumentError` if `type` is not
-  one of `types/0` or `content` is not a map.
+  Optional `:seq` (non-negative integer), `:conversation_id` (string), and
+  `:inserted_at` (`DateTime`) may be supplied; the persistence layer normally
+  assigns them. Raises `ArgumentError` if `type` is not one of `types/0`, if
+  `content` is not a map, or if an opt has the wrong type.
   """
   @spec new(type(), map(), keyword()) :: t()
   def new(type, content, opts \\ [])
@@ -49,9 +50,9 @@ defmodule Agentix.Event do
     %__MODULE__{
       type: type,
       content: content,
-      seq: Keyword.get(opts, :seq),
-      conversation_id: Keyword.get(opts, :conversation_id),
-      inserted_at: Keyword.get(opts, :inserted_at)
+      seq: validate_seq!(Keyword.get(opts, :seq)),
+      conversation_id: validate_conversation_id!(Keyword.get(opts, :conversation_id)),
+      inserted_at: validate_inserted_at!(Keyword.get(opts, :inserted_at))
     }
   end
 
@@ -61,5 +62,26 @@ defmodule Agentix.Event do
 
   def new(type, _content, _opts) do
     raise ArgumentError, "invalid event type #{inspect(type)}; expected one of #{inspect(@types)}"
+  end
+
+  defp validate_seq!(nil), do: nil
+  defp validate_seq!(seq) when is_integer(seq) and seq >= 0, do: seq
+
+  defp validate_seq!(other) do
+    raise ArgumentError, "event :seq must be a non-negative integer, got: #{inspect(other)}"
+  end
+
+  defp validate_conversation_id!(nil), do: nil
+  defp validate_conversation_id!(id) when is_binary(id), do: id
+
+  defp validate_conversation_id!(other) do
+    raise ArgumentError, "event :conversation_id must be a string, got: #{inspect(other)}"
+  end
+
+  defp validate_inserted_at!(nil), do: nil
+  defp validate_inserted_at!(%DateTime{} = inserted_at), do: inserted_at
+
+  defp validate_inserted_at!(other) do
+    raise ArgumentError, "event :inserted_at must be a DateTime, got: #{inspect(other)}"
   end
 end

@@ -19,19 +19,22 @@ defmodule Agentix.Scope do
 
   @doc """
   Builds a scope from `attrs` (`:current_user`, `:assigns`, `:system?`).
+
+  Raises `ArgumentError` on unknown keys, or if a system scope is given a
+  `current_user` (the system scope carries no user by definition).
   """
   @spec new(keyword() | map()) :: t()
   def new(attrs \\ []) do
-    attrs = Map.new(attrs)
-
-    %__MODULE__{
-      current_user: Map.get(attrs, :current_user),
-      system?: Map.get(attrs, :system?, false),
-      assigns: Map.get(attrs, :assigns, %{})
-    }
+    __MODULE__ |> struct!(attrs) |> validate!()
   end
 
   @doc "The documented system scope used by timeout-driven resolutions."
   @spec system() :: t()
   def system, do: %__MODULE__{system?: true}
+
+  defp validate!(%__MODULE__{system?: true, current_user: user}) when not is_nil(user) do
+    raise ArgumentError, "a system scope cannot carry a :current_user"
+  end
+
+  defp validate!(%__MODULE__{} = scope), do: scope
 end
