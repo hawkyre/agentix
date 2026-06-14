@@ -114,9 +114,13 @@ defmodule Agentix.Persistence.ETS do
 
   @impl true
   def pending_tool_calls(conversation_id) do
-    @tool_calls
-    |> :ets.select([{{:_, :"$1"}, [], [:"$1"]}])
-    |> Enum.filter(&(&1.conversation_id == conversation_id and &1.status == :pending))
+    :ets.select(@tool_calls, [
+      {{:_, :"$1"},
+       [
+         {:andalso, {:==, {:map_get, :conversation_id, :"$1"}, conversation_id},
+          {:==, {:map_get, :status, :"$1"}, :pending}}
+       ], [:"$1"]}
+    ])
   end
 
   @impl true
@@ -175,19 +179,16 @@ defmodule Agentix.Persistence.ETS do
   def gc_model_calls(conversation_id, ttl_ms) do
     cutoff = DateTime.add(DateTime.utc_now(), -ttl_ms, :millisecond)
 
-    deleted =
+    {stale, _fresh} =
       conversation_id
       |> model_calls()
-      |> Enum.count(fn model_call ->
-        if DateTime.after?(model_call.inserted_at, cutoff) do
-          false
-        else
-          :ets.delete(@model_calls, {conversation_id, model_call.turn_ref})
-          true
-        end
-      end)
+      |> Enum.split_with(fn model_call -> not DateTime.after?(model_call.inserted_at, cutoff) end)
 
-    {:ok, deleted}
+    Enum.each(stale, fn model_call ->
+      :ets.delete(@model_calls, {conversation_id, model_call.turn_ref})
+    end)
+
+    {:ok, length(stale)}
   end
 
   defp audit_enabled?, do: Application.get_env(:agentix, :audit, false)

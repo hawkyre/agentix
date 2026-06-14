@@ -58,6 +58,13 @@ defmodule Agentix.Persistence.ETS.Owner do
 
   def handle_call({:schedule_expiry, conversation_id, tool_call_id, timeout_ms}, _from, state) do
     key = {conversation_id, tool_call_id}
+    # Cancel any in-flight timer for this key so a reschedule can't leak a spurious
+    # `{:expire, key}` message.
+    case state.timers[key] do
+      nil -> :ok
+      existing -> Process.cancel_timer(existing)
+    end
+
     ref = Process.send_after(self(), {:expire, key}, timeout_ms)
     {:reply, :ok, put_in(state.timers[key], ref)}
   end

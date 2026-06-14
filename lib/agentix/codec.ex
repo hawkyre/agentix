@@ -85,6 +85,10 @@ defmodule Agentix.Codec do
   defp decode_each(nil, _fun), do: nil
   defp decode_each(list, fun) when is_list(list), do: Enum.map(list, fun)
 
+  defp decode_each(other, _fun) do
+    raise ArgumentError, "expected a list or nil, got: #{inspect(other)}"
+  end
+
   defp decode_role(role) when role in [:user, :assistant, :system, :tool], do: role
   defp decode_role("user"), do: :user
   defp decode_role("assistant"), do: :assistant
@@ -106,9 +110,18 @@ defmodule Agentix.Codec do
     raise ArgumentError, "unknown content part type: #{inspect(other)}"
   end
 
-  # ContentPart's Jason.Encoder base64-encodes binary `data`; reverse it.
+  # ContentPart's Jason.Encoder base64-encodes binary `data`; reverse it. Use the
+  # non-bang variant so corrupt persisted data raises a clear, catchable error
+  # rather than an opaque crash from the :base64 primitive.
   defp decode_data(nil), do: nil
-  defp decode_data(data) when is_binary(data), do: Base.decode64!(data)
+
+  defp decode_data(data) when is_binary(data) do
+    case Base.decode64(data) do
+      {:ok, decoded} -> decoded
+      :error -> raise ArgumentError, "content part data is not valid base64"
+    end
+  end
+
   defp decode_data(data), do: data
 
   # A ToolCall encodes as %{"id", "type", "function" => %{"name", "arguments"}}.
@@ -139,5 +152,13 @@ defmodule Agentix.Codec do
 
   defp decode_provider(nil), do: nil
   defp decode_provider(provider) when is_atom(provider), do: provider
-  defp decode_provider(provider) when is_binary(provider), do: String.to_existing_atom(provider)
+
+  # `to_existing_atom` cannot exhaust the atom table (it never creates atoms), but
+  # it raises on an unknown/unloaded provider — turn that into a clear error.
+  defp decode_provider(provider) when is_binary(provider) do
+    String.to_existing_atom(provider)
+  rescue
+    ArgumentError ->
+      reraise ArgumentError.exception("unknown provider: #{inspect(provider)}"), __STACKTRACE__
+  end
 end

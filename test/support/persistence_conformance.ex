@@ -9,14 +9,15 @@ defmodule Agentix.PersistenceConformance do
         use Agentix.PersistenceConformance, adapter: Agentix.Persistence.ETS
       end
 
-  The using module may pass `setup:` work of its own (e.g. the Ecto sandbox) via a
-  normal `setup` block; this suite only relies on the public behaviour and uses a
-  fresh conversation id per test for isolation.
+  Lives in `test/support` (not `lib/`) so the ExUnit-dependent scaffold never ships
+  in the released package. The using module may add its own `setup` (e.g. the Ecto
+  sandbox); this suite only relies on the public behaviour and uses a fresh
+  conversation id per test for isolation. It must run `async: false` — the audit
+  test mutates the global `:agentix, :audit` env.
   """
 
-  # A shared ExUnit suite is, by construction, one long quote in `__using__` —
-  # the tests must be injected into the using module. The long-quote-block check
-  # does not apply to this pattern.
+  # A shared ExUnit suite is, by construction, one long quote in `__using__` — the
+  # tests must be injected into the using module. The check does not apply here.
   # credo:disable-for-this-file Credo.Check.Refactor.LongQuoteBlocks
   defmacro __using__(opts) do
     quote location: :keep do
@@ -42,7 +43,8 @@ defmodule Agentix.PersistenceConformance do
             flunk("condition not met before timeout")
 
           true ->
-            Process.sleep(5) && do_wait(fun, deadline)
+            Process.sleep(5)
+            do_wait(fun, deadline)
         end
       end
 
@@ -57,6 +59,17 @@ defmodule Agentix.PersistenceConformance do
         assert Enum.map(events, & &1.type) == [:user_msg, :assistant_msg]
         assert Enum.map(events, & &1.content) == [%{n: 1}, %{n: 2}]
         assert Enum.all?(events, &(&1.conversation_id == conv))
+      end
+
+      test "seq is scoped per conversation (interleaved appends stay independent)" do
+        a = uid("conv")
+        b = uid("conv")
+        {:ok, a1} = @adapter.append_event(a, Event.new(:user_msg, %{}))
+        {:ok, b1} = @adapter.append_event(b, Event.new(:user_msg, %{}))
+        {:ok, a2} = @adapter.append_event(a, Event.new(:user_msg, %{}))
+
+        assert {a1, a2, b1} == {1, 2, 1}
+        assert Enum.map(@adapter.stream_events(b), & &1.seq) == [1]
       end
 
       test "stream_events :after filters by seq" do
@@ -117,6 +130,16 @@ defmodule Agentix.PersistenceConformance do
         assert {:error, :stale} = @adapter.resolve_tool_call(tcid, :resolved, %{ok: true})
       end
 
+      test "pending_tool_calls is scoped to the conversation" do
+        a = uid("conv")
+        b = uid("conv")
+        :ok = @adapter.upsert_tool_call(a, %{id: uid("call"), executor: :human})
+        :ok = @adapter.upsert_tool_call(b, %{id: uid("call"), executor: :human})
+
+        assert length(@adapter.pending_tool_calls(a)) == 1
+        assert Enum.all?(@adapter.pending_tool_calls(a), &(&1.conversation_id == a))
+      end
+
       test "resolve_tool_call on an unknown id is stale" do
         assert {:error, :stale} = @adapter.resolve_tool_call(uid("nope"), :resolved, %{})
       end
@@ -148,6 +171,18 @@ defmodule Agentix.PersistenceConformance do
         :ok = @adapter.upsert_tool_call(conv, %{id: tcid, executor: :human})
         :ok = @adapter.schedule_expiry(conv, tcid, 50)
         :ok = @adapter.cancel_expiry(conv, tcid)
+
+        Process.sleep(80)
+        assert @adapter.get_tool_call(tcid).status == :pending
+      end
+
+      test "rescheduling expiry does not leak the first timer" do
+        conv = uid("conv")
+        tcid = uid("call")
+        :ok = @adapter.upsert_tool_call(conv, %{id: tcid, executor: :human})
+        :ok = @adapter.schedule_expiry(conv, tcid, 20)
+        # Reschedule far out; the original 20ms timer must not fire.
+        :ok = @adapter.schedule_expiry(conv, tcid, 5_000)
 
         Process.sleep(80)
         assert @adapter.get_tool_call(tcid).status == :pending

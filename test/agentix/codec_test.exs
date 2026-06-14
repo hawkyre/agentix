@@ -131,4 +131,28 @@ defmodule Agentix.CodecTest do
              |> Map.fetch!(:tool_calls) == [ToolCall.new("call_1", "f", "{}")]
     end
   end
+
+  describe "decode error handling" do
+    test "an unknown provider raises a clear error" do
+      assert_raise ArgumentError, ~r/unknown provider/, fn ->
+        Codec.decode_message(%{
+          "role" => "assistant",
+          "content" => [],
+          "reasoning_details" => [%{"provider" => "definitely_not_a_provider"}]
+        })
+      end
+    end
+
+    test "invalid base64 data raises a clear error" do
+      assert_raise ArgumentError, ~r/not valid base64/, fn ->
+        Codec.decode_content_part(%{"type" => "image", "data" => "!!!not base64!!!"})
+      end
+    end
+
+    test "a non-list content field raises a clear error" do
+      assert_raise ArgumentError, ~r/expected a list or nil/, fn ->
+        Codec.decode_message(%{"role" => "user", "content" => "oops"})
+      end
+    end
+  end
 end
