@@ -5,11 +5,17 @@ defmodule Agentix.Agent do
 
   ## States (v0 turn loop)
 
-      idle ──send_message──> preparing ──assembled──> streaming ──done──> idle
-      any non-idle ──cancel──> idle (records a partial assistant turn)
+      idle ─send_message─> preparing ─> streaming ─done(no tools)─> idle
+                                          │
+                                          └─done(tool_calls)─> executing_tools
+      executing_tools ─all resolved─> preparing (next model call, same turn)
+      executing_tools ─any suspends─> awaiting_input ─resolve─> preparing
+      any non-idle ─cancel─> idle (records a partial assistant turn)
 
-  `executing_tools` and `awaiting_input` join in Inc 6 (tools / HITL). Callback mode
-  is `:state_functions`.
+  A tool loop is several model calls **under one turn** — `executing_tools`/
+  `awaiting_input` loop back into `preparing` (same `turn_ref`, new assistant
+  message); only a tool-free completion ends the turn. Callback mode is
+  `:state_functions`.
 
   ## Non-blocking principle
 
@@ -35,6 +41,10 @@ defmodule Agentix.Agent do
   alias Agentix.Events.Publisher
   alias Agentix.Persistence
   alias Agentix.Provider
+  alias Agentix.Scope
+  alias Agentix.Tool
+  alias Agentix.Tool.Dispatch
+  alias Agentix.Turn
   alias ReqLLM.Context
   alias ReqLLM.Message
   alias ReqLLM.Message.ContentPart
@@ -43,8 +53,9 @@ defmodule Agentix.Agent do
 
   defmodule Data do
     @moduledoc false
-    # FSM data. `turn` is `nil` outside a turn and a map while preparing/streaming:
-    # `%{ref, msg_id, scope, task_pid, monitor_ref, cancel, text, thinking}`.
+    # FSM data. `turn` is `nil` outside a turn, else a map carrying the turn ref,
+    # assistant msg_id, scope, the streaming task (task_pid/monitor_ref/cancel),
+    # accumulated text/thinking, and `calls` (tool_call_id => call tracking entry).
     @enforce_keys [:conversation_id, :config, :publisher]
     defstruct [
       :conversation_id,
@@ -139,9 +150,10 @@ defmodule Agentix.Agent do
     turn = data.turn
     agent = self()
     model = data.config.model
-    # Provider opts (temperature, max_tokens, pool config) are derived from config
-    # in a later increment; the stream is started bare in v0.
-    opts = []
+    # Tools are handed to the provider for schema/serialization; the loop dispatches
+    # them itself (the provider never auto-executes). Other opts (temperature,
+    # max_tokens, pool config) are derived from config in a later increment.
+    opts = stream_opts(data.config)
 
     %{pid: pid, ref: ref} =
       Task.Supervisor.async_nolink(Agentix.TaskSupervisor, fn ->
@@ -210,6 +222,66 @@ defmodule Agentix.Agent do
 
   def streaming(event_type, event, data), do: handle_common(:streaming, event_type, event, data)
 
+  ## State: executing_tools — server/provider calls in flight, none awaiting external
+
+  def executing_tools(:info, {:tool_done, ref, id, result}, %Data{turn: %{ref: ref}} = data) do
+    data |> do_record_result(id, result) |> advance()
+  end
+
+  def executing_tools(:info, {:tool_timeout, ref, id}, %Data{turn: %{ref: ref}} = data) do
+    maybe_timeout(data, id)
+  end
+
+  def executing_tools(:info, {:DOWN, mref, :process, _pid, reason}, %Data{} = data) do
+    tool_task_down(data, mref, reason)
+  end
+
+  def executing_tools({:call, from}, {:resolve, id, result, scope}, data) do
+    handle_resolve(data, from, id, result, scope)
+  end
+
+  def executing_tools({:call, from}, {:send_message, _m, _s}, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
+  end
+
+  def executing_tools({:call, from}, :cancel, data) do
+    {data, actions} = abort_turn(data, from)
+    {:next_state, :idle, data, actions}
+  end
+
+  def executing_tools(event_type, event, data),
+    do: handle_common(:executing_tools, event_type, event, data)
+
+  ## State: awaiting_input — at least one call awaiting an external resolution
+
+  def awaiting_input({:call, from}, {:resolve, id, result, scope}, data) do
+    handle_resolve(data, from, id, result, scope)
+  end
+
+  def awaiting_input(:info, {:tool_done, ref, id, result}, %Data{turn: %{ref: ref}} = data) do
+    data |> do_record_result(id, result) |> advance()
+  end
+
+  def awaiting_input(:info, {:tool_timeout, ref, id}, %Data{turn: %{ref: ref}} = data) do
+    maybe_timeout(data, id)
+  end
+
+  def awaiting_input(:info, {:DOWN, mref, :process, _pid, reason}, %Data{} = data) do
+    tool_task_down(data, mref, reason)
+  end
+
+  def awaiting_input({:call, from}, {:send_message, _m, _s}, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
+  end
+
+  def awaiting_input({:call, from}, :cancel, data) do
+    {data, actions} = abort_turn(data, from)
+    {:next_state, :idle, data, actions}
+  end
+
+  def awaiting_input(event_type, event, data),
+    do: handle_common(:awaiting_input, event_type, event, data)
+
   ## Shared handlers
 
   # Stale stream messages from a superseded/cancelled turn (ref no longer current)
@@ -226,6 +298,18 @@ defmodule Agentix.Agent do
   defp handle_common(_state, :info, {:DOWN, _ref, :process, _pid, _reason}, _data) do
     :keep_state_and_data
   end
+
+  # A resolve for a conversation that is not awaiting this id (no turn, wrong state,
+  # or already resolved) is stale, not a crash.
+  defp handle_common(_state, {:call, from}, {:resolve, _id, _result, _scope}, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :stale}}]}
+  end
+
+  # Late tool-task signals from a finished/superseded turn.
+  defp handle_common(_state, :info, {:tool_done, _ref, _id, _result}, _data),
+    do: :keep_state_and_data
+
+  defp handle_common(_state, :info, {:tool_timeout, _ref, _id}, _data), do: :keep_state_and_data
 
   defp handle_common(_state, _event_type, _event, _data), do: :keep_state_and_data
 
@@ -248,7 +332,9 @@ defmodule Agentix.Agent do
       cancel: nil,
       context: nil,
       text: "",
-      thinking: ""
+      thinking: "",
+      # tool_call_id => %{tool, name, args, phase, task, result, timer}
+      calls: %{}
     }
 
     data = %{data | turn: turn}
@@ -267,12 +353,21 @@ defmodule Agentix.Agent do
     data = maybe_audit(%{data | last_seq: seq}, message, usage)
 
     Publisher.message_completed(data.publisher, turn.ref, message)
-    Publisher.turn_completed(data.publisher, turn.ref)
+
+    case message.tool_calls do
+      [_ | _] = tool_calls -> begin_tool_calls(data, tool_calls)
+      _ -> finish_turn(data)
+    end
+  end
+
+  # No tool calls — the turn is genuinely complete.
+  defp finish_turn(data) do
+    Publisher.turn_completed(data.publisher, data.turn.ref)
 
     :telemetry.execute(
       [:agentix, :turn, :stop],
       %{},
-      %{conversation_id: data.conversation_id, turn_ref: turn.ref}
+      %{conversation_id: data.conversation_id, turn_ref: data.turn.ref}
     )
 
     finish(data, :idle)
@@ -306,6 +401,7 @@ defmodule Agentix.Agent do
     if turn.task_pid, do: Task.Supervisor.terminate_child(Agentix.TaskSupervisor, turn.task_pid)
     if is_function(turn.cancel, 0), do: turn.cancel.()
 
+    data = cancel_tool_calls(data)
     data = record_partial(data, " [cancelled]")
     Publisher.cancelled(data.publisher, turn.ref)
 
@@ -349,6 +445,319 @@ defmodule Agentix.Agent do
 
   defp drop_monitor(_turn), do: :ok
 
+  ## Tool execution
+
+  # The assistant message carried tool calls. Record each as a `:tool_call` event,
+  # start it per its executor, then pick the next state.
+  defp begin_tool_calls(data, tool_calls) do
+    data
+    |> then(fn d ->
+      Enum.reduce(tool_calls, d, fn tool_call, acc -> begin_one_call(acc, tool_call) end)
+    end)
+    |> advance()
+  end
+
+  defp begin_one_call(data, %ReqLLM.ToolCall{id: id, function: function}) do
+    name = function["name"] || function[:name]
+    args = parse_args(function["arguments"] || function[:arguments])
+
+    {:ok, seq} =
+      append_event(data, :tool_call, %{"tool_call_id" => id, "name" => name, "args" => args})
+
+    tool = find_tool(data.config, name)
+    start_call(%{data | last_seq: seq}, id, name, tool, args)
+  end
+
+  # Unknown tool the model hallucinated — record an error result so the call/result
+  # pair stays intact (providers reject orphan tool_calls).
+  defp start_call(data, id, name, nil, args) do
+    data
+    |> put_call(id, call_entry(nil, name, args, :done))
+    |> do_record_result(id, %{ok: false, error: "unknown tool: #{name}"})
+  end
+
+  # Provider-hosted: resolves in-stream. v0 records a pass-through result and never
+  # dispatches it locally (full provider-tool round-trip is post-v0).
+  defp start_call(data, id, name, %Tool{executor: :provider} = tool, args) do
+    data
+    |> put_call(id, call_entry(tool, name, args, :done))
+    |> do_record_result(id, %{ok: true, result: nil})
+  end
+
+  # Server, auto: dispatch the callback in a monitored task; it reports back via
+  # `{:tool_done, ...}`. A running server call is internal — not a persisted pending.
+  defp start_call(data, id, name, %Tool{executor: :server, approval: :auto} = tool, args) do
+    Publisher.tool_call_started(data.publisher, id, name, :server, args)
+    task = Dispatch.run_server(self(), data.turn.ref, id, tool, args, build_turn(data))
+    put_call(data, id, call_entry(tool, name, args, :running, task: task))
+  end
+
+  # Everything else suspends and awaits an external resolution: gated `:server` /
+  # `:client` (approval first), `:human` (elicitation), `:client` (client exec).
+  defp start_call(data, id, name, %Tool{} = tool, args) do
+    phase = suspend_phase(tool)
+    suspend_call(data, id, name, tool, args, phase)
+  end
+
+  defp suspend_call(data, id, name, %Tool{} = tool, args, phase) do
+    kind = phase_kind(tool, phase)
+
+    Persistence.upsert_tool_call(data.conversation_id, %{
+      id: id,
+      conversation_id: data.conversation_id,
+      name: name,
+      executor: tool.executor,
+      status: :pending,
+      args: args
+    })
+
+    Publisher.tool_call_started(data.publisher, id, name, tool.executor, args)
+    Publisher.suspended(data.publisher, id, tool.executor, %{kind: kind, args: args})
+    timer = arm_timeout(data, id)
+    put_call(data, id, call_entry(tool, name, args, phase, timer: timer))
+  end
+
+  # Resolution arrived for a pending call. Reply `:ok` immediately, then advance.
+  defp handle_resolve(data, from, id, result, _scope) do
+    case current_call(data, id) do
+      %{phase: phase} = call when phase in [:awaiting_approval, :awaiting_exec, :awaiting_human] ->
+        data
+        |> apply_resolution(id, call, result)
+        |> advance()
+        |> with_reply(from, :ok)
+
+      _ ->
+        {:keep_state_and_data, [{:reply, from, {:error, :stale}}]}
+    end
+  end
+
+  # Gated call: approve transitions to the executor's real phase; deny resolves it.
+  defp apply_resolution(data, id, %{phase: :awaiting_approval, tool: tool} = call, result) do
+    cancel_timer(call.timer)
+
+    if approved?(result) do
+      approve_call(data, id, tool)
+    else
+      do_record_result(data, id, %{ok: false, error: "denied by approver"})
+    end
+  end
+
+  # Client returned its execution output; the answer is the result.
+  defp apply_resolution(data, id, %{phase: :awaiting_exec}, result) do
+    do_record_result(data, id, Dispatch.normalize_result(result))
+  end
+
+  # Human elicitation: the answer *is* the result.
+  defp apply_resolution(data, id, %{phase: :awaiting_human}, result) do
+    do_record_result(data, id, Dispatch.normalize_result(result))
+  end
+
+  defp approve_call(data, id, %Tool{executor: :server} = tool) do
+    # No longer awaiting external input; clear the durable pending record, then run.
+    Persistence.resolve_tool_call(id, :resolved, %{approved: true})
+    call = current_call(data, id)
+    Publisher.tool_call_started(data.publisher, id, call.name, :server, call.args)
+    task = Dispatch.run_server(self(), data.turn.ref, id, tool, call.args, build_turn(data))
+    update_call(data, id, %{call | phase: :running, task: task, timer: nil})
+  end
+
+  defp approve_call(data, id, %Tool{executor: :client}) do
+    # Gated client: second suspension for the actual client execution.
+    call = current_call(data, id)
+    Publisher.suspended(data.publisher, id, :client, %{kind: :client_exec, args: call.args})
+    timer = arm_timeout(data, id)
+    update_call(data, id, %{call | phase: :awaiting_exec, timer: timer})
+  end
+
+  # Records a terminal result for a call: writes the paired `:tool_result` event,
+  # clears any durable pending record, broadcasts, and marks the call done.
+  defp do_record_result(data, id, result) do
+    call = current_call(data, id)
+    cancel_timer(call.timer)
+
+    {:ok, seq} =
+      append_event(data, :tool_result, %{
+        "tool_call_id" => id,
+        "name" => call.name,
+        "result" => result
+      })
+
+    Persistence.resolve_tool_call(id, result_status(result), result)
+    broadcast_result(data.publisher, id, result)
+    update_call(%{data | last_seq: seq}, id, %{call | phase: :done, result: result, timer: nil})
+  end
+
+  defp maybe_timeout(data, id) do
+    case current_call(data, id) do
+      %{phase: phase} when phase in [:awaiting_approval, :awaiting_exec, :awaiting_human] ->
+        data
+        |> do_record_result(id, %{ok: false, error: "timed out: no response"})
+        |> advance()
+
+      _ ->
+        :keep_state_and_data
+    end
+  end
+
+  # A server tool task crashed before reporting. Record the failure so the pair stays
+  # intact. A `:normal` exit is the task's own clean shutdown after `:tool_done`.
+  defp tool_task_down(data, mref, reason) do
+    case call_by_task_ref(data, mref) do
+      {id, %{phase: :running}} when reason != :normal ->
+        data
+        |> do_record_result(id, %{ok: false, error: "tool crashed: #{inspect(reason)}"})
+        |> advance()
+
+      _ ->
+        :keep_state_and_data
+    end
+  end
+
+  # Pick the next state from the calls' phases.
+  defp advance(data) do
+    calls = data.turn.calls
+
+    cond do
+      Enum.all?(calls, fn {_id, c} -> c.phase == :done end) -> continue_turn(data)
+      Enum.any?(calls, fn {_id, c} -> awaiting?(c.phase) end) -> enter_awaiting(data)
+      true -> enter_executing(data)
+    end
+  end
+
+  # All tool results are in — feed them back to the model in a new model call under
+  # the *same* turn (a tool loop is several model calls per turn, not a new turn).
+  defp continue_turn(data) do
+    turn = %{
+      data.turn
+      | msg_id: new_msg_id(),
+        task_pid: nil,
+        monitor_ref: nil,
+        cancel: nil,
+        text: "",
+        thinking: "",
+        calls: %{}
+    }
+
+    Publisher.state_changed(data.publisher, :preparing)
+    {:next_state, :preparing, %{data | turn: turn}, [{:next_event, :internal, :assemble}]}
+  end
+
+  defp enter_awaiting(data) do
+    Persistence.put_fsm_state(data.conversation_id, %{
+      state: :awaiting_input,
+      pending: pending_subset(data.turn.calls),
+      last_seq: data.last_seq
+    })
+
+    Publisher.state_changed(data.publisher, :awaiting_input)
+    {:next_state, :awaiting_input, data}
+  end
+
+  defp enter_executing(data) do
+    Publisher.state_changed(data.publisher, :executing_tools)
+    {:next_state, :executing_tools, data}
+  end
+
+  ## Tool helpers
+
+  defp call_entry(tool, name, args, phase, opts \\ []) do
+    %{
+      tool: tool,
+      name: name,
+      args: args,
+      phase: phase,
+      task: Keyword.get(opts, :task),
+      result: nil,
+      timer: Keyword.get(opts, :timer)
+    }
+  end
+
+  defp put_call(data, id, entry), do: update_call(data, id, entry)
+
+  defp update_call(data, id, entry) do
+    %{data | turn: %{data.turn | calls: Map.put(data.turn.calls, id, entry)}}
+  end
+
+  defp current_call(%Data{turn: %{calls: calls}}, id), do: Map.get(calls, id)
+  defp current_call(_data, _id), do: nil
+
+  defp call_by_task_ref(%Data{turn: %{calls: calls}}, mref) do
+    Enum.find(calls, fn {_id, c} -> match?(%Task{ref: ^mref}, c.task) end)
+  end
+
+  defp call_by_task_ref(_data, _mref), do: nil
+
+  defp awaiting?(phase), do: phase in [:awaiting_approval, :awaiting_exec, :awaiting_human]
+
+  defp suspend_phase(%Tool{approval: :requires_approval}), do: :awaiting_approval
+  defp suspend_phase(%Tool{executor: :human}), do: :awaiting_human
+  defp suspend_phase(%Tool{executor: :client}), do: :awaiting_exec
+
+  defp phase_kind(tool, :awaiting_approval), do: Tool.pending_kind(tool, :approval)
+  defp phase_kind(tool, _phase), do: Tool.pending_kind(tool, :exec)
+
+  # The renderer/persisted pending: only the awaiting-external subset.
+  defp pending_subset(calls) do
+    for {id, %{phase: phase} = call} <- calls, awaiting?(phase), into: %{} do
+      {id, %{executor: call.tool.executor, kind: phase_kind(call.tool, phase), prompt: call.args}}
+    end
+  end
+
+  defp build_turn(data) do
+    Turn.new(context: data.turn.context, turn_ref: data.turn.ref, scope: data.turn.scope)
+  end
+
+  defp find_tool(%Config{tools: tools}, name), do: Enum.find(tools, &(&1.name == name))
+
+  defp parse_args(args) when is_map(args), do: args
+  defp parse_args(json) when is_binary(json) and json != "", do: Jason.decode!(json)
+  defp parse_args(_other), do: %{}
+
+  defp approved?(:approve), do: true
+  defp approved?(%{approved: value}), do: value == true
+  defp approved?(%{"approved" => value}), do: value == true
+  defp approved?(_other), do: false
+
+  defp result_status(%{ok: true}), do: :resolved
+  defp result_status(_result), do: :errored
+
+  defp broadcast_result(publisher, id, %{ok: true} = result),
+    do: Publisher.tool_call_resolved(publisher, id, result)
+
+  defp broadcast_result(publisher, id, result),
+    do: Publisher.tool_call_errored(publisher, id, result)
+
+  defp arm_timeout(data, id),
+    do: Process.send_after(self(), {:tool_timeout, data.turn.ref, id}, data.config.default_timeout)
+
+  defp cancel_timer(nil), do: :ok
+  defp cancel_timer(ref) when is_reference(ref), do: Process.cancel_timer(ref)
+
+  defp with_reply({:next_state, state, data, actions}, from, reply),
+    do: {:next_state, state, data, [{:reply, from, reply} | actions]}
+
+  defp with_reply({:next_state, state, data}, from, reply),
+    do: {:next_state, state, data, [{:reply, from, reply}]}
+
+  # On cancel, shut down running server tasks, cancel timers, and synthesize a
+  # `[cancelled]` result for every unresolved call so each tool_call keeps a pair.
+  defp cancel_tool_calls(%Data{turn: %{calls: calls}} = data) do
+    Enum.reduce(calls, data, fn
+      {_id, %{phase: :done}}, acc ->
+        acc
+
+      {id, call}, acc ->
+        cancel_timer(call.timer)
+
+        if match?(%Task{}, call.task),
+          do: Task.Supervisor.terminate_child(Agentix.TaskSupervisor, call.task.pid)
+
+        do_record_result(acc, id, %{ok: false, error: "[cancelled]"})
+    end)
+  end
+
+  defp cancel_tool_calls(data), do: data
+
   ## Streaming task (runs under Agentix.TaskSupervisor)
 
   defp run_stream(agent, turn_ref, model, context, opts) do
@@ -385,8 +794,7 @@ defmodule Agentix.Agent do
     history =
       data.conversation_id
       |> Persistence.stream_events()
-      |> Enum.filter(&(&1.type in [:user_msg, :assistant_msg]))
-      |> Enum.map(&decode_event_message/1)
+      |> Enum.flat_map(&event_to_messages/1)
 
     system =
       case data.config.system_prompt do
@@ -398,9 +806,27 @@ defmodule Agentix.Agent do
     Context.new(system ++ history)
   end
 
-  defp decode_event_message(%Event{content: content}) do
-    Codec.decode_message(content["message"] || content[:message])
+  # Maps a log event to the messages the model sees. `:tool_call` events carry no
+  # message of their own — the calls already ride on the assistant message — so they
+  # are skipped; `:tool_result` events become `:tool` role messages.
+  defp event_to_messages(%Event{type: type, content: content})
+       when type in [:user_msg, :assistant_msg],
+       do: [Codec.decode_message(content["message"] || content[:message])]
+
+  defp event_to_messages(%Event{type: :tool_result, content: content}) do
+    id = content["tool_call_id"] || content[:tool_call_id]
+    result = content["result"] || content[:result]
+    [%Message{role: :tool, tool_call_id: id, content: [ContentPart.text(encode_result(result))]}]
   end
+
+  defp event_to_messages(_event), do: []
+
+  defp encode_result(result) when is_binary(result), do: result
+  defp encode_result(result), do: Jason.encode!(result)
+
+  # Provider opts: hand the tool schemas through (the loop dispatches them itself).
+  defp stream_opts(%Config{tools: []}), do: []
+  defp stream_opts(%Config{tools: tools}), do: [tools: Tool.to_reqllm(tools)]
 
   ## Recovery
 
@@ -412,7 +838,7 @@ defmodule Agentix.Agent do
   defp recover(events) do
     case List.last(events) do
       %Event{type: :user_msg} ->
-        {:idle, [{:next_event, :internal, {:rerun, Agentix.Scope.system()}}]}
+        {:idle, [{:next_event, :internal, {:rerun, Scope.system()}}]}
 
       _ ->
         {:idle, []}

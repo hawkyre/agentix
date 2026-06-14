@@ -80,6 +80,23 @@ defmodule Agentix.Events.Publisher do
   def message_completed(ctx, turn_ref, message),
     do: publish(ctx, {:message_completed, turn_ref, message})
 
+  @doc "Broadcasts that a tool call has begun (dispatched or suspended)."
+  @spec tool_call_started(context(), String.t(), String.t(), atom(), map()) :: :ok
+  def tool_call_started(ctx, id, name, executor, args),
+    do: publish(ctx, {:tool_call_started, id, name, executor, args})
+
+  @doc "Broadcasts that a tool call resolved with a successful result."
+  @spec tool_call_resolved(context(), String.t(), term()) :: :ok
+  def tool_call_resolved(ctx, id, result), do: publish(ctx, {:tool_call_resolved, id, result})
+
+  @doc "Broadcasts that a tool call resolved with an error."
+  @spec tool_call_errored(context(), String.t(), term()) :: :ok
+  def tool_call_errored(ctx, id, reason), do: publish(ctx, {:tool_call_errored, id, reason})
+
+  @doc "Broadcasts that a tool call suspended, awaiting an external resolution."
+  @spec suspended(context(), String.t(), atom(), term()) :: :ok
+  def suspended(ctx, id, executor, prompt), do: publish(ctx, {:suspended, id, executor, prompt})
+
   @doc "Broadcasts that the turn completed normally."
   @spec turn_completed(context(), term()) :: :ok
   def turn_completed(ctx, turn_ref), do: publish(ctx, {:turn_completed, turn_ref})
