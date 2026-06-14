@@ -9,7 +9,14 @@ defmodule Agentix.Application do
       [
         # Per-conversation agents are addressed through this registry — it is the
         # single addressing point (Registry -> Horde/syn later).
-        {Registry, keys: :unique, name: Agentix.Registry}
+        {Registry, keys: :unique, name: Agentix.Registry},
+        # The default live-event backbone. A host that supervises its own
+        # `Phoenix.PubSub` sets `config :agentix, :pubsub, MyApp.PubSub` and ignores
+        # this one; the default lets a zero-config consumer stream out of the box.
+        {Phoenix.PubSub, name: Agentix.PubSub},
+        # Monitored streaming/tool tasks run here so the agent never blocks on I/O
+        # and a killed task never takes the agent with it.
+        {Task.Supervisor, name: Agentix.TaskSupervisor}
       ] ++
         persistence_children() ++
         [

@@ -56,6 +56,9 @@ defmodule Agentix.MixProject do
     [
       # Core — ReqLLM provides provider abstraction and the canonical typed model.
       {:req_llm, "~> 1.16"},
+      # Core — the live-event backbone for every streaming transport. Pulls no
+      # Phoenix/web deps; a zero-pubsub consumer sets `notifier: Agentix.Notifier.None`.
+      {:phoenix_pubsub, "~> 2.2"},
 
       # Dev/test tooling
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
@@ -83,7 +86,7 @@ defmodule Agentix.MixProject do
 
   defp dialyzer do
     [
-      plt_add_apps: [:ex_unit, :mix],
+      plt_add_apps: [:ex_unit, :mix, :phoenix_pubsub],
       plt_local_path: "priv/plts",
       plt_core_path: "priv/plts",
       flags: [:error_handling, :extra_return, :missing_return, :unknown]
