@@ -225,19 +225,19 @@ defmodule Agentix.Agent do
   ## State: executing_tools — server/provider calls in flight, none awaiting external
 
   def executing_tools(:info, {:tool_done, ref, id, result}, %Data{turn: %{ref: ref}} = data) do
-    data |> do_record_result(id, result) |> advance()
+    data |> do_record_result(id, result) |> advance(:executing_tools)
   end
 
   def executing_tools(:info, {:tool_timeout, ref, id}, %Data{turn: %{ref: ref}} = data) do
-    maybe_timeout(data, id)
+    maybe_timeout(data, id, :executing_tools)
   end
 
   def executing_tools(:info, {:DOWN, mref, :process, _pid, reason}, %Data{} = data) do
-    tool_task_down(data, mref, reason)
+    tool_task_down(data, mref, reason, :executing_tools)
   end
 
   def executing_tools({:call, from}, {:resolve, id, result, scope}, data) do
-    handle_resolve(data, from, id, result, scope)
+    handle_resolve(data, from, id, result, scope, :executing_tools)
   end
 
   def executing_tools({:call, from}, {:send_message, _m, _s}, _data) do
@@ -255,19 +255,19 @@ defmodule Agentix.Agent do
   ## State: awaiting_input — at least one call awaiting an external resolution
 
   def awaiting_input({:call, from}, {:resolve, id, result, scope}, data) do
-    handle_resolve(data, from, id, result, scope)
+    handle_resolve(data, from, id, result, scope, :awaiting_input)
   end
 
   def awaiting_input(:info, {:tool_done, ref, id, result}, %Data{turn: %{ref: ref}} = data) do
-    data |> do_record_result(id, result) |> advance()
+    data |> do_record_result(id, result) |> advance(:awaiting_input)
   end
 
   def awaiting_input(:info, {:tool_timeout, ref, id}, %Data{turn: %{ref: ref}} = data) do
-    maybe_timeout(data, id)
+    maybe_timeout(data, id, :awaiting_input)
   end
 
   def awaiting_input(:info, {:DOWN, mref, :process, _pid, reason}, %Data{} = data) do
-    tool_task_down(data, mref, reason)
+    tool_task_down(data, mref, reason, :awaiting_input)
   end
 
   def awaiting_input({:call, from}, {:send_message, _m, _s}, _data) do
@@ -334,7 +334,9 @@ defmodule Agentix.Agent do
       text: "",
       thinking: "",
       # tool_call_id => %{tool, name, args, phase, task, result, timer}
-      calls: %{}
+      calls: %{},
+      # monitor_ref => tool_call_id, for O(1) crashed-task lookup on :DOWN
+      task_index: %{}
     }
 
     data = %{data | turn: turn}
@@ -451,7 +453,9 @@ defmodule Agentix.Agent do
   # start it per its executor, then pick the next state.
   defp begin_tool_calls(data, tool_calls) do
     data = Enum.reduce(tool_calls, data, fn tool_call, acc -> begin_one_call(acc, tool_call) end)
-    advance(data)
+    # Entered from `streaming` (the assistant message just finalized), so any target
+    # state is a genuine transition.
+    advance(data, :streaming)
   end
 
   defp begin_one_call(data, %ReqLLM.ToolCall{id: id, function: function}) do
@@ -501,7 +505,9 @@ defmodule Agentix.Agent do
     task =
       Dispatch.run_server(self(), data.turn.ref, id, tool, args, build_turn(data, data.turn.scope))
 
-    update_call(data, id, call_entry(tool, name, args, :running, task: task))
+    data
+    |> track_task(task.ref, id)
+    |> update_call(id, call_entry(tool, name, args, :running, task: task))
   end
 
   # Everything else suspends and awaits an external resolution: gated `:server` /
@@ -532,12 +538,12 @@ defmodule Agentix.Agent do
   # Resolution arrived for a pending call. Reply `:ok` immediately, then advance.
   # `scope` is the resolver's (e.g. the approver), threaded into a post-approval
   # `:server` dispatch so the callback runs as whoever authorized it.
-  defp handle_resolve(data, from, id, result, scope) do
+  defp handle_resolve(data, from, id, result, scope, from_state) do
     case current_call(data, id) do
       %{phase: phase} = call when phase in [:awaiting_approval, :awaiting_exec, :awaiting_human] ->
         data
         |> apply_resolution(id, call, result, scope)
-        |> advance()
+        |> advance(from_state)
         |> with_reply(from, :ok)
 
       _ ->
@@ -567,7 +573,10 @@ defmodule Agentix.Agent do
     Persistence.resolve_tool_call(id, :resolved, %{approved: true})
     Publisher.tool_call_started(data.publisher, id, call.name, :server, call.args)
     task = Dispatch.run_server(self(), data.turn.ref, id, tool, call.args, build_turn(data, scope))
-    update_call(data, id, %{call | phase: :running, task: task, timer: nil})
+
+    data
+    |> track_task(task.ref, id)
+    |> update_call(id, %{call | phase: :running, task: task, timer: nil})
   end
 
   defp approve_call(data, id, %Tool{executor: :client}, _scope) do
@@ -584,6 +593,9 @@ defmodule Agentix.Agent do
   defp do_record_result(data, id, result) do
     call = current_call(data, id)
     cancel_timer(call.timer)
+    # Release the server task's monitor (flushing its now-irrelevant normal `:DOWN`)
+    # so it never reaches `tool_task_down`, and drop it from the crash index.
+    data = release_task(data, call)
 
     {:ok, seq} =
       append_event(data, :tool_result, %{
@@ -597,40 +609,43 @@ defmodule Agentix.Agent do
     update_call(%{data | last_seq: seq}, id, %{call | phase: :done, result: result, timer: nil})
   end
 
-  defp maybe_timeout(data, id) do
+  defp maybe_timeout(data, id, from_state) do
     case current_call(data, id) do
       %{phase: phase} when phase in [:awaiting_approval, :awaiting_exec, :awaiting_human] ->
         data
         |> do_record_result(id, %{ok: false, error: "timed out: no response"})
-        |> advance()
+        |> advance(from_state)
 
       _ ->
         :keep_state_and_data
     end
   end
 
-  # A server tool task crashed before reporting. Record the failure so the pair stays
-  # intact. A `:normal` exit is the task's own clean shutdown after `:tool_done`.
-  defp tool_task_down(data, mref, reason) do
-    case call_by_task_ref(data, mref) do
-      {id, %{phase: :running}} when reason != :normal ->
+  # A server tool task crashed before reporting. The crashed call's id is resolved in
+  # O(1) via the turn's `monitor_ref => id` index. A `:normal` exit never reaches here
+  # — `do_record_result` demonitors+flushes the task on `:tool_done`.
+  defp tool_task_down(data, mref, reason, from_state) do
+    case data.turn.task_index[mref] do
+      nil ->
+        :keep_state_and_data
+
+      id ->
         data
         |> do_record_result(id, %{ok: false, error: "tool crashed: #{inspect(reason)}"})
-        |> advance()
-
-      _ ->
-        :keep_state_and_data
+        |> advance(from_state)
     end
   end
 
-  # Pick the next state from the calls' phases.
-  defp advance(data) do
+  # Pick the next state from the calls' phases. `from_state` lets us skip a no-op
+  # `:state_changed` broadcast when the FSM stays put (e.g. one of several pending
+  # calls resolves but others still await).
+  defp advance(data, from_state) do
     calls = data.turn.calls
 
     cond do
       Enum.all?(calls, fn {_id, c} -> c.phase == :done end) -> continue_turn(data)
-      Enum.any?(calls, fn {_id, c} -> awaiting?(c.phase) end) -> enter_awaiting(data)
-      true -> enter_executing(data)
+      Enum.any?(calls, fn {_id, c} -> awaiting?(c.phase) end) -> enter_awaiting(data, from_state)
+      true -> enter_executing(data, from_state)
     end
   end
 
@@ -645,26 +660,29 @@ defmodule Agentix.Agent do
         cancel: nil,
         text: "",
         thinking: "",
-        calls: %{}
+        calls: %{},
+        task_index: %{}
     }
 
     Publisher.state_changed(data.publisher, :preparing)
     {:next_state, :preparing, %{data | turn: turn}, [{:next_event, :internal, :assemble}]}
   end
 
-  defp enter_awaiting(data) do
+  # The persisted pending set may have changed even when staying in `:awaiting_input`,
+  # so always re-persist it; only broadcast `:state_changed` on a real transition.
+  defp enter_awaiting(data, from_state) do
     Persistence.put_fsm_state(data.conversation_id, %{
       state: :awaiting_input,
       pending: pending_subset(data.turn.calls),
       last_seq: data.last_seq
     })
 
-    Publisher.state_changed(data.publisher, :awaiting_input)
+    if from_state != :awaiting_input, do: Publisher.state_changed(data.publisher, :awaiting_input)
     {:next_state, :awaiting_input, data}
   end
 
-  defp enter_executing(data) do
-    Publisher.state_changed(data.publisher, :executing_tools)
+  defp enter_executing(data, from_state) do
+    if from_state != :executing_tools, do: Publisher.state_changed(data.publisher, :executing_tools)
     {:next_state, :executing_tools, data}
   end
 
@@ -689,11 +707,18 @@ defmodule Agentix.Agent do
   defp current_call(%Data{turn: %{calls: calls}}, id), do: Map.get(calls, id)
   defp current_call(_data, _id), do: nil
 
-  defp call_by_task_ref(%Data{turn: %{calls: calls}}, mref) do
-    Enum.find(calls, fn {_id, c} -> match?(%Task{ref: ^mref}, c.task) end)
+  defp track_task(data, ref, id) do
+    %{data | turn: %{data.turn | task_index: Map.put(data.turn.task_index, ref, id)}}
   end
 
-  defp call_by_task_ref(_data, _mref), do: nil
+  # Demonitor (flushing any pending `:DOWN`) and drop a finished/cancelled server
+  # task from the crash index. A no-op for non-server calls (no task).
+  defp release_task(data, %{task: %Task{ref: ref}}) do
+    Process.demonitor(ref, [:flush])
+    %{data | turn: %{data.turn | task_index: Map.delete(data.turn.task_index, ref)}}
+  end
+
+  defp release_task(data, _call), do: data
 
   defp awaiting?(phase), do: phase in [:awaiting_approval, :awaiting_exec, :awaiting_human]
 
@@ -765,20 +790,18 @@ defmodule Agentix.Agent do
 
       {id, call}, acc ->
         cancel_timer(call.timer)
-        shutdown_task(call.task)
+        terminate_task(call.task)
+        # `do_record_result` releases the monitor (demonitor + flush) and untracks it.
         do_record_result(acc, id, %{ok: false, error: "[cancelled]"})
     end)
   end
 
   defp cancel_tool_calls(data), do: data
 
-  # Terminate a running tool task and release its monitor so no stray `:DOWN` lingers.
-  defp shutdown_task(%Task{pid: pid, ref: ref}) do
-    Process.demonitor(ref, [:flush])
-    Task.Supervisor.terminate_child(Agentix.TaskSupervisor, pid)
-  end
+  defp terminate_task(%Task{pid: pid}),
+    do: Task.Supervisor.terminate_child(Agentix.TaskSupervisor, pid)
 
-  defp shutdown_task(_no_task), do: :ok
+  defp terminate_task(_no_task), do: :ok
 
   ## Streaming task (runs under Agentix.TaskSupervisor)
 

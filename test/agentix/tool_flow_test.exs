@@ -279,5 +279,23 @@ defmodule Agentix.ToolFlowTest do
       assert %{ok: false, error: "invalid tool arguments"} = tool_result(id, "echo")
       assert final_assistant_text(id) == "recovered"
     end
+
+    test "a crashed server tool is resolved to an error and the turn recovers", %{id: id} do
+      crash = Tool.new(name: "boom", executor: :server, callback: fn _a, _t -> exit(:kaboom) end)
+
+      MockProvider.script([
+        completion("", tool_calls: [{"boom", %{}}]),
+        completion("survived")
+      ])
+
+      {:ok, pid} = Conversation.ensure_started(id, config: config([crash]))
+      :ok = Conversation.send_message(id, "go", Scope.new())
+
+      assert_receive {:tool_call_errored, _tid, %{ok: false}}
+      assert_receive {:turn_completed, _ref}
+      assert Process.alive?(pid)
+      assert %{ok: false} = tool_result(id, "boom")
+      assert final_assistant_text(id) == "survived"
+    end
   end
 end
