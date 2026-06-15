@@ -75,6 +75,10 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       |> assign(:streaming?, streaming?(snapshot.state))
       |> assign(:in_flight_tools, snapshot.in_flight_tools)
       |> assign(:pending, snapshot.pending)
+      # Has the current assistant turn already shown its header? Continuation rows
+      # (tools, later streaming, pending) render headerless once it has, so a turn
+      # never shows a second "Assistant" header.
+      |> assign(:agentix_assistant_open, false)
       |> stream(:messages, snapshot.messages, dom_id: &dom_id/1)
       |> seed_streaming(snapshot.streaming_message)
     end
@@ -134,10 +138,14 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       |> push_event("agentix:delta", %{id: msg_id, kind: "thinking", chunk: chunk, seq: seq})
     end
 
-    def apply_event(socket, {:message_completed, _turn_ref, %Message{} = message}) do
+    def apply_event(socket, {:message_completed, _turn_ref, %Message{role: role} = message}) do
       socket
       |> stream_insert(:messages, message)
       |> assign(:streaming_message, nil)
+      |> assign(
+        :agentix_assistant_open,
+        role == :assistant or socket.assigns.agentix_assistant_open
+      )
     end
 
     def apply_event(socket, {:tool_call_started, id, name, executor, _args}) do
@@ -240,6 +248,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       |> assign(:streaming?, false)
       |> assign(:in_flight_tools, %{})
       |> assign(:pending, %{})
+      |> assign(:agentix_assistant_open, false)
     end
   end
 end

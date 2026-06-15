@@ -36,6 +36,12 @@ if Code.ensure_loaded?(Phoenix.Component) do
     attr(:in_flight_tools, :map, default: %{})
     attr(:pending, :map, default: %{})
 
+    attr(:assistant_open, :boolean,
+      default: false,
+      doc:
+        "true once the current assistant turn has shown a header; continuation rows then render headerless"
+    )
+
     def message_list(assigns) do
       ~H"""
       <div
@@ -46,36 +52,48 @@ if Code.ensure_loaded?(Phoenix.Component) do
         <.message :for={{dom_id, message} <- @messages} id={dom_id} message={message} />
       </div>
 
-      <div
-        :if={@streaming_message || @in_flight_tools != %{}}
-        class="agentix-row group flex gap-3.5 border-t border-neutral-200/70 py-5 dark:border-neutral-800/70"
-        data-role="assistant"
-      >
-        <.avatar role={:assistant} />
-        <div class="min-w-0 flex-1">
-          <.role_header role={:assistant} />
-          <div :if={@in_flight_tools != %{}} class="mb-3 space-y-2">
-            <.tool
-              :for={{id, t} <- @in_flight_tools}
-              id={id}
-              name={t.name}
-              status={Map.get(t, :status, :running)}
-              meta={Map.get(t, :meta)}
-            />
-          </div>
-          <.streaming_message :if={@streaming_message} message={@streaming_message} />
+      <.assistant_turn :if={@streaming_message || @in_flight_tools != %{}} open={@assistant_open}>
+        <div :if={@in_flight_tools != %{}} class="mb-3 space-y-2">
+          <.tool
+            :for={{id, t} <- @in_flight_tools}
+            id={id}
+            name={t.name}
+            status={Map.get(t, :status, :running)}
+            meta={Map.get(t, :meta)}
+          />
         </div>
-      </div>
+        <.streaming_message :if={@streaming_message} message={@streaming_message} />
+      </.assistant_turn>
 
+      <.assistant_turn :for={{id, entry} <- @pending} open={@assistant_open}>
+        <.pending id={id} entry={entry} />
+      </.assistant_turn>
+      """
+    end
+
+    # An assistant continuation row: shows the avatar + header only when the turn has
+    # not opened one yet (`open` false); otherwise it's a headerless continuation that
+    # merges with the assistant block above — so a turn never repeats the header.
+    attr(:open, :boolean, required: true)
+    slot(:inner_block, required: true)
+
+    defp assistant_turn(assigns) do
+      ~H"""
       <div
-        :for={{id, entry} <- @pending}
-        class="agentix-row group flex gap-3.5 border-t border-neutral-200/70 py-5 dark:border-neutral-800/70"
+        class={[
+          "agentix-row group flex gap-3.5",
+          if(@open,
+            do: "-mt-3 pb-5 pt-1",
+            else: "border-t border-neutral-200/70 py-5 dark:border-neutral-800/70"
+          )
+        ]}
         data-role="assistant"
       >
-        <.avatar role={:assistant} />
+        <.avatar :if={!@open} role={:assistant} />
+        <div :if={@open} class="mt-0.5 h-7 w-7 shrink-0" aria-hidden="true"></div>
         <div class="min-w-0 flex-1">
-          <.role_header role={:assistant} />
-          <.pending id={id} entry={entry} />
+          <.role_header :if={!@open} role={:assistant} />
+          {render_slot(@inner_block)}
         </div>
       </div>
       """
@@ -265,7 +283,7 @@ if Code.ensure_loaded?(Phoenix.Component) do
          and header, and pull the row up so it reads as one block. */
       .agentix-thread > [data-role="assistant"] + [data-role="assistant"],
       .agentix-thread > [data-role="user"] + [data-role="user"] {
-        border-top-color: transparent;
+        border-top-color: transparent !important;
         padding-top: 0.25rem;
         margin-top: -0.75rem;
       }
