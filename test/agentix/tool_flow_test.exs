@@ -128,6 +128,28 @@ defmodule Agentix.ToolFlowTest do
       assert ui_tool.metadata["tool_status"] == "ok"
       assert Enum.find(ui, &(&1.role == :assistant)).metadata["id"]
     end
+
+    test "a non-JSON-serializable tool result is rendered via inspect, not a crash",
+         %{id: id} do
+      # A tuple result has no `Jason.Encoder`; `encode_result/1` must fall back to inspect
+      # rather than raise inside `assemble_context` (which feeds the model every turn).
+      weird =
+        Tool.new(name: "weird", executor: :server, callback: fn _a, _t -> {:ok, {:a, :tuple}} end)
+
+      MockProvider.script([
+        completion("", tool_calls: [{"weird", %{}}]),
+        completion("ok")
+      ])
+
+      {:ok, _pid} = Conversation.ensure_started(id, config: config([weird]))
+      :ok = Conversation.send_message(id, "go", Scope.new())
+
+      # The turn completing at all proves the follow-up context assembled without raising.
+      assert_receive {:turn_completed, _ref}
+      second = Enum.at(MockProvider.requests(), 1)
+      tool_msg = Enum.find(second.context.messages, &(&1.role == :tool))
+      assert Enum.map_join(tool_msg.content, "", & &1.text) =~ "tuple"
+    end
   end
 
   describe ":provider executor (pass-through, in-process)" do
