@@ -23,14 +23,29 @@ defmodule AgentixComponents do
       <.message :for={{dom_id, message} <- @messages} id={dom_id} message={message} />
     </div>
 
-    <.streaming_message :if={@streaming_message} message={@streaming_message} />
-
-    <div :if={@in_flight_tools != %{}} class="space-y-2 py-3">
-      <.tool :for={{id, tool} <- @in_flight_tools} id={id} tool={tool} />
+    <div
+      :if={@streaming_message || @in_flight_tools != %{}}
+      class="group flex gap-3.5 border-t border-neutral-200/70 py-5 dark:border-neutral-800/70"
+    >
+      <.avatar role={:assistant} />
+      <div class="min-w-0 flex-1">
+        <.role_header role={:assistant} />
+        <div class="space-y-3">
+          <.tool :for={{id, tool} <- @in_flight_tools} id={id} tool={tool} />
+          <.streaming_message :if={@streaming_message} message={@streaming_message} />
+        </div>
+      </div>
     </div>
 
-    <div :if={@pending != %{}} class="space-y-3 py-3">
-      <.pending :for={{id, entry} <- @pending} id={id} entry={entry} />
+    <div
+      :for={{id, entry} <- @pending}
+      class="group flex gap-3.5 border-t border-neutral-200/70 py-5 dark:border-neutral-800/70"
+    >
+      <.avatar role={:assistant} />
+      <div class="min-w-0 flex-1">
+        <.role_header role={:assistant} />
+        <.pending id={id} entry={entry} />
+      </div>
     </div>
     """
   end
@@ -44,10 +59,8 @@ defmodule AgentixComponents do
     <div id={@id} class="group flex gap-3.5 py-5">
       <.avatar role={@message.role} />
       <div class="min-w-0 flex-1">
-        <div class="mb-1 flex items-center gap-2">
-          <span class="text-[13px] font-semibold">{role_label(@message.role)}</span>
-        </div>
-        <div :if={@bubble == []} class="text-[14.5px] leading-relaxed text-neutral-700 dark:text-neutral-200">
+        <.role_header role={@message.role} />
+        <div :if={@bubble == []} class="text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200">
           {message_text(@message)}
         </div>
         {render_slot(@bubble, @message)}
@@ -60,19 +73,13 @@ defmodule AgentixComponents do
 
   def streaming_message(assigns) do
     ~H"""
-    <div class="flex gap-3.5 py-5">
-      <.avatar role={:assistant} />
-      <div
-        id={"agentix-stream-#{@message.id}"}
-        class="min-w-0 flex-1 space-y-3"
-        phx-hook="AgentixStream"
-        phx-update="ignore"
-        data-msg-id={@message.id}
-      >
-        <div data-agentix="thinking" class="whitespace-pre-wrap text-[13px] leading-relaxed text-neutral-500 empty:hidden dark:text-neutral-400"></div>
-        <div data-agentix="text" class="caret whitespace-pre-wrap text-[14.5px] leading-relaxed text-neutral-700 dark:text-neutral-200"></div>
-      </div>
-    </div>
+    <div
+      id={"agentix-stream-#{@message.id}"}
+      class="space-y-3"
+      phx-hook="AgentixStream"
+      phx-update="ignore"
+      data-msg-id={@message.id}
+    ><div data-agentix="thinking" class="whitespace-pre-wrap text-[13px] leading-relaxed text-neutral-500 empty:hidden dark:text-neutral-400"></div><div data-agentix="text" class="caret whitespace-pre-wrap text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200"></div></div>
     """
   end
 
@@ -82,13 +89,13 @@ defmodule AgentixComponents do
   def tool(assigns) do
     ~H"""
     <div id={"tool-#{@id}"} class="overflow-hidden rounded-md border border-neutral-200 dark:border-neutral-800">
-      <div class="flex items-center gap-2 px-3 py-2 text-[12.5px]">
+      <div class="flex items-center gap-2 px-3 py-2 text-[13px]">
         <svg class="h-3.5 w-3.5 animate-spin text-neutral-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
           <path d="M21 12a9 9 0 1 1-6.2-8.5" stroke-linecap="round" />
         </svg>
         <span class="font-mono text-[12px] text-neutral-700 dark:text-neutral-200">{@tool.name}</span>
         <span class="text-neutral-400">running</span>
-        <span class="ml-auto text-[11px] text-neutral-400">{@tool.executor}</span>
+        <span class="ml-auto text-[12px] text-neutral-400">{@tool.executor}</span>
       </div>
     </div>
     """
@@ -106,13 +113,13 @@ defmodule AgentixComponents do
           <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
         </svg>
         <div class="min-w-0 flex-1">
-          <div class="text-[13.5px] font-semibold text-amber-900 dark:text-amber-200">Permission required</div>
+          <div class="text-[13px] font-semibold text-amber-900 dark:text-amber-200">Permission required</div>
           <div class="mt-0.5 text-[13px] text-amber-800/90 dark:text-amber-200/80">{prompt_label(@entry)}</div>
           <div class="mt-3 flex flex-wrap items-center gap-2">
-            <button type="button" phx-click="approve" phx-value-id={@id} class="rounded-md bg-neutral-900 px-3 py-1.5 text-[12.5px] font-medium text-neutral-50 transition hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-white">
+            <button type="button" phx-click="approve" phx-value-id={@id} class="rounded-md bg-neutral-900 px-3 py-1.5 text-[13px] font-medium text-neutral-50 transition hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-white">
               Allow
             </button>
-            <button type="button" phx-click="deny" phx-value-id={@id} class="rounded-md px-3 py-1.5 text-[12.5px] font-medium text-neutral-500 transition hover:bg-neutral-200/70 dark:text-neutral-400 dark:hover:bg-neutral-800/70">
+            <button type="button" phx-click="deny" phx-value-id={@id} class="rounded-md px-3 py-1.5 text-[13px] font-medium text-neutral-500 transition hover:bg-neutral-200/70 dark:text-neutral-400 dark:hover:bg-neutral-800/70">
               Deny
             </button>
           </div>
@@ -129,11 +136,21 @@ defmodule AgentixComponents do
       <label class="text-[13px] font-medium text-neutral-700 dark:text-neutral-200">{prompt_label(@entry)}</label>
       <div class="mt-2 flex gap-2">
         <input type="text" name={input_name(@entry)} placeholder="Your response…" class="flex-1 rounded-md border border-neutral-300 bg-white px-2.5 py-1.5 text-[13px] text-neutral-800 placeholder:text-neutral-400 focus:border-neutral-400 focus:outline-none dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100" />
-        <button type="submit" class="rounded-md bg-neutral-900 px-3 py-1.5 text-[12.5px] font-medium text-neutral-50 transition hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-white">
+        <button type="submit" class="rounded-md bg-neutral-900 px-3 py-1.5 text-[13px] font-medium text-neutral-50 transition hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-white">
           Send
         </button>
       </div>
     </form>
+    """
+  end
+
+  attr :role, :atom, required: true
+
+  defp role_header(assigns) do
+    ~H"""
+    <div class="mb-1 flex items-center gap-2">
+      <span class="text-[13px] font-semibold">{role_label(@role)}</span>
+    </div>
     """
   end
 
