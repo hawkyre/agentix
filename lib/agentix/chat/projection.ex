@@ -11,8 +11,9 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         deltas pushed to the JS hook (tagged with `kind`) so a growing string is never
         re-diffed server-side; only the finalized message lands in `:messages`;
       * `:state` — the agent's current turn state, and `:streaming?` derived from it;
-      * `:in_flight_tools` — `%{tool_call_id => %{name, executor, progress}}` (running
-        tool dispatches only — a suspended tool moves to `:pending`);
+      * `:in_flight_tools` — `%{tool_call_id => %{name, executor, status}}` where `status`
+        is `:running` | `:ok` | `:error`; a resolved tool keeps its outcome for the rest of
+        the turn (a suspended tool moves to `:pending`);
       * `:pending` — `%{tool_call_id => %{executor, kind, prompt}}` awaiting resolution.
 
     `attach/3` subscribes **before** reading the snapshot, so no event is lost in the
@@ -143,7 +144,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       update(
         socket,
         :in_flight_tools,
-        &Map.put(&1, id, %{name: name, executor: executor, progress: nil})
+        &Map.put(&1, id, %{name: name, executor: executor, status: :running})
       )
     end
 
@@ -156,8 +157,8 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       end)
     end
 
-    def apply_event(socket, {:tool_call_resolved, id, _result}), do: clear_tool(socket, id)
-    def apply_event(socket, {:tool_call_errored, id, _reason}), do: clear_tool(socket, id)
+    def apply_event(socket, {:tool_call_resolved, id, _result}), do: resolve_tool(socket, id, :ok)
+    def apply_event(socket, {:tool_call_errored, id, _reason}), do: resolve_tool(socket, id, :error)
 
     def apply_event(socket, {:suspended, id, executor, prompt}) do
       entry = %{
@@ -220,11 +221,16 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       end
     end
 
-    # A resolved/errored call leaves both the in-flight and pending sets (a suspended
-    # call lived in `pending`; a dispatched server call lived in `in_flight_tools`).
-    defp clear_tool(socket, id) do
+    # A resolved/errored call stays visible with its outcome (`:ok` / `:error`) for the
+    # rest of the turn instead of vanishing; it leaves the pending set either way.
+    defp resolve_tool(socket, id, status) do
       socket
-      |> update(:in_flight_tools, &Map.delete(&1, id))
+      |> update(:in_flight_tools, fn tools ->
+        case tools do
+          %{^id => entry} -> Map.put(tools, id, %{entry | status: status})
+          _ -> tools
+        end
+      end)
       |> update(:pending, &Map.delete(&1, id))
     end
 

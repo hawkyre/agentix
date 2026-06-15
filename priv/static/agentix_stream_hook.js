@@ -64,4 +64,31 @@ export const AgentixStream = {
   },
 }
 
+// Composer hook: auto-grows the textarea, submits on Enter (Shift+Enter = newline),
+// and clears the field after the form submits. Attach to the <textarea> inside the
+// composer form (the <.composer> component already wires `phx-hook="AgentixComposer"`).
+export const AgentixComposer = {
+  mounted() {
+    this.resize()
+    this.el.addEventListener("input", () => this.resize())
+    this.el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault()
+        if (this.el.value.trim()) this.el.form?.requestSubmit()
+      }
+    })
+    this.el.form?.addEventListener("submit", () => {
+      requestAnimationFrame(() => {
+        this.el.value = ""
+        this.resize()
+      })
+    })
+  },
+
+  resize() {
+    this.el.style.height = "auto"
+    this.el.style.height = Math.min(this.el.scrollHeight, 160) + "px"
+  },
+}
+
 export default AgentixStream
