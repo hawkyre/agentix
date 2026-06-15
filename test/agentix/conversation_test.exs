@@ -182,6 +182,15 @@ defmodule Agentix.ConversationTest do
       assert_receive {:turn_completed, _ref}
 
       assert request_text() =~ "partial [turn cancelled]"
+
+      # The truncation reason rides the wire as text only — the internal `status`/`id`
+      # metadata is stripped at the model boundary, never serialized to the provider.
+      %{context: context} = List.last(MockProvider.requests())
+
+      for message <- ReqLLM.Context.to_list(context) do
+        refute Map.has_key?(message.metadata || %{}, "status")
+        refute Map.has_key?(message.metadata || %{}, "id")
+      end
     end
   end
 

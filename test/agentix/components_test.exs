@@ -62,6 +62,31 @@ defmodule Agentix.ComponentsTest do
     end
   end
 
+  describe "message/1 — tool rows" do
+    test "an errored tool with no name renders the error state and the 'tool' fallback label" do
+      assigns = %{
+        message: %Message{
+          role: :tool,
+          tool_call_id: "t1",
+          content: [],
+          metadata: %{"tool_status" => "error"}
+        }
+      }
+
+      html =
+        rendered_to_string(~H"""
+        <Agentix.Components.message message={@message} />
+        """)
+
+      # status drives the error styling + label; a missing name falls back to "tool".
+      assert html =~ "error"
+      assert html =~ "tool"
+      assert html =~ "red"
+      # tool rows never render a role header.
+      refute html =~ "agentix-role-header"
+    end
+  end
+
   describe "message/1 — :bubble slot" do
     test "a custom :bubble slot replaces the default bubble" do
       assigns = %{message: %Message{role: :assistant, content: [ContentPart.text("default-text")]}}

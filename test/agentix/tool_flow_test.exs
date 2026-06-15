@@ -105,19 +105,28 @@ defmodule Agentix.ToolFlowTest do
       :ok = Conversation.send_message(id, "weather?", Scope.new())
       assert_receive {:turn_completed, _ref}
 
-      # The second model call carries the tool result back to the provider. Its `:tool`
-      # message must be clean — UI metadata (`tool_name`/`tool_status`) on it would be
-      # serialized onto the OpenAI-format wire payload.
+      # The second model call carries the prior turn back to the provider. NO message in
+      # that context may carry Agentix's internal metadata — the OpenAI-format encoder
+      # serializes `Message.metadata` verbatim onto the wire. This covers the tool row's
+      # `tool_name`/`tool_status` AND the assistant row's `id`/`status` bookkeeping.
+      internal_keys = ~w(id status tool_name tool_status)
       second_call = Enum.at(MockProvider.requests(), 1)
-      tool_msg = Enum.find(second_call.context.messages, &(&1.role == :tool))
-      assert tool_msg, "expected a tool message in the follow-up model context"
-      refute Map.has_key?(tool_msg.metadata || %{}, "tool_name")
-      refute Map.has_key?(tool_msg.metadata || %{}, "tool_status")
 
-      # The UI path (history/snapshot) decorates the same row so components can name it.
-      ui_tool = Enum.find(Agentix.Agent.history(id).messages, &(&1.role == :tool))
+      assert Enum.find(second_call.context.messages, &(&1.role == :tool)),
+             "expected a tool message in the follow-up model context"
+
+      for msg <- second_call.context.messages, key <- internal_keys do
+        refute Map.has_key?(msg.metadata || %{}, key),
+               "internal metadata #{inspect(key)} leaked to the model on a #{msg.role} message"
+      end
+
+      # The UI path (history/snapshot) keeps the metadata so components can render: a
+      # named tool card, and a stable per-message stream id.
+      ui = Agentix.Agent.history(id).messages
+      ui_tool = Enum.find(ui, &(&1.role == :tool))
       assert ui_tool.metadata["tool_name"] == "weather"
       assert ui_tool.metadata["tool_status"] == "ok"
+      assert Enum.find(ui, &(&1.role == :assistant)).metadata["id"]
     end
   end
 

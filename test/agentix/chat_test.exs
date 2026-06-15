@@ -109,6 +109,49 @@ defmodule Agentix.ChatTest do
 
       assert live == snapshot
     end
+
+    test "a resolved tool persists as a stream row that a reconnect rebuilds identically",
+         ctx do
+      tool = Tool.new(name: "lookup", executor: :server, callback: fn _a, _t -> {:ok, "42"} end)
+      start_conversation(ctx.id, tools: [tool])
+      MockProvider.script([completion("", tool_calls: [{"lookup", %{}}]), completion("done")])
+
+      {:ok, view, _html} = mount_chat(ctx.conn, ctx.id)
+      view |> form("#composer", %{"text" => "go"}) |> render_submit()
+      assert_receive {:tool_call_resolved, tool_call_id, %{ok: true}}
+      assert_receive {:turn_completed, _ref}
+
+      # The resolved tool is a finalized row in the live stream (not cleared at turn end),
+      # keyed on the tool-call id...
+      dom_id = "agentix-msg-tool-" <> tool_call_id
+      assert has_element?(view, "##{dom_id}")
+      assert view |> element("##{dom_id} .role") |> render() =~ "tool"
+
+      # ...and a reconnecting client rebuilds the same row from history under the same id.
+      {:ok, view2, _html} = mount_chat(build_conn(), ctx.id)
+      assert has_element?(view2, "##{dom_id}")
+    end
+  end
+
+  describe "dom_id/1 — stream keying contract" do
+    alias Agentix.Chat.Projection
+    alias ReqLLM.Message
+
+    test "a tool row keys on its tool_call_id so a live insert and a reload converge" do
+      assert Projection.dom_id(%Message{role: :tool, tool_call_id: "t1"}) == "agentix-msg-tool-t1"
+    end
+
+    test "a message with a metadata id keys on it" do
+      assert Projection.dom_id(%Message{role: :assistant, metadata: %{"id" => "m1"}}) ==
+               "agentix-msg-m1"
+    end
+
+    test "a message with neither id falls back to a distinct generated id" do
+      one = Projection.dom_id(%Message{role: :user})
+      two = Projection.dom_id(%Message{role: :user})
+      assert one =~ "agentix-msg-"
+      assert one != two
+    end
   end
 
   describe "history pagination" do

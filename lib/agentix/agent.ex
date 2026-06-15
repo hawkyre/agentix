@@ -132,7 +132,7 @@ defmodule Agentix.Agent do
     cursor = events |> Enum.map(& &1.seq) |> Enum.min(fn -> nil end)
 
     %{
-      messages: Enum.flat_map(events, &event_to_ui_message/1),
+      messages: Enum.flat_map(events, &event_to_messages/1),
       cursor: cursor,
       more?: cursor != nil and cursor > 1
     }
@@ -1111,7 +1111,12 @@ defmodule Agentix.Agent do
   # afterward, past the breakpoint) stay within the window without busting the cache.
   defp assemble_context(data) do
     {summary, events} = Persistence.load_since(data.conversation_id)
-    history = events |> Enum.flat_map(&event_to_messages/1) |> Enum.map(&mark_truncated/1)
+
+    history =
+      events
+      |> Enum.flat_map(&event_to_messages/1)
+      |> Enum.map(&mark_truncated/1)
+      |> Enum.map(&strip_internal_metadata/1)
 
     (system_prefix(data.config) ++ summary_prefix(summary) ++ history)
     |> Context.new()
@@ -1166,40 +1171,49 @@ defmodule Agentix.Agent do
     Compaction.Budget.new(max(0, config.working_budget - config.injection_reserve))
   end
 
-  # Maps a log event to the messages the **model** sees. `:tool_call` events carry no
-  # message of their own — the calls already ride on the assistant message — so they
-  # are skipped; `:tool_result` events become clean `:tool` role messages. Deliberately
-  # carries no presentation metadata: this output is encoded onto the provider wire (the
-  # OpenAI-format encoder serializes `Message.metadata` verbatim), so UI decoration is
-  # added only on the UI path via `event_to_ui_message/1`.
+  # Maps a log event to messages. `:tool_call` events carry no message of their own —
+  # the calls already ride on the assistant message — so they are skipped; `:tool_result`
+  # events become `:tool` messages decorated with `tool_name`/`tool_status` so the default
+  # components can render a named card. That metadata (plus the assistant `id`/`status`
+  # bookkeeping) is internal — the UI path keeps it; `assemble_context/1` strips it via
+  # `strip_internal_metadata/1` before the model boundary.
   defp event_to_messages(%Event{type: type, content: content})
        when type in [:user_msg, :assistant_msg],
        do: [Codec.decode_message(content["message"] || content[:message])]
 
   defp event_to_messages(%Event{type: :tool_result, content: content}) do
     id = content["tool_call_id"] || content[:tool_call_id]
+    name = content["name"] || content[:name]
     result = content["result"] || content[:result]
-    [%Message{role: :tool, tool_call_id: id, content: [ContentPart.text(encode_result(result))]}]
+
+    [
+      %Message{
+        role: :tool,
+        tool_call_id: id,
+        content: [ContentPart.text(encode_result(result))],
+        metadata: %{"tool_name" => name, "tool_status" => to_string(tool_result_status(result))}
+      }
+    ]
   end
 
   defp event_to_messages(_event), do: []
 
-  # UI path (`history/2`, and the projection's reconnect seed through it): same messages
-  # the model sees, with a tool row decorated with `tool_name`/`tool_status` metadata so
-  # the default components can render a named card. Namespaced to avoid the `"status"`
-  # key `mark_truncated/1` keys on. The model path never sees this metadata.
-  defp event_to_ui_message(%Event{type: :tool_result, content: content} = event) do
-    name = content["name"] || content[:name]
-    status = content["result"] || content[:result]
-    decorate = %{"tool_name" => name, "tool_status" => to_string(tool_result_status(status))}
-    Enum.map(event_to_messages(event), &%{&1 | metadata: decorate})
-  end
+  # Agentix stamps internal bookkeeping onto `Message.metadata` (a stream `id`, a turn
+  # `status`, a tool's display `name`/`status`). None of it is meant for the model — but
+  # the OpenAI-format encoder serializes `Message.metadata` verbatim onto the wire, so the
+  # model boundary drops the known internal keys. Provider-meaningful metadata (atom-keyed,
+  # e.g. Anthropic's `:is_error`) is deliberately left untouched.
+  @internal_metadata_keys ~w(id status tool_name tool_status)
 
-  defp event_to_ui_message(event), do: event_to_messages(event)
+  defp strip_internal_metadata(%Message{metadata: metadata} = message) when is_map(metadata),
+    do: %{message | metadata: Map.drop(metadata, @internal_metadata_keys)}
+
+  defp strip_internal_metadata(message), do: message
 
   # Model-context only: a partial assistant turn stores its `status` in metadata (clean
   # text for the UI). Re-append a short marker so the model still sees the turn was cut —
   # the UI path (`history/2`) skips this and renders the clean text plus its own badge.
+  # Runs before `strip_internal_metadata/1`, while the `status` key is still present.
   defp mark_truncated(%Message{metadata: %{"status" => status}} = message)
        when status in ["cancelled", "error"] do
     %{message | content: message.content ++ [ContentPart.text(truncation_marker(status))]}
