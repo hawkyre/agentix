@@ -81,6 +81,8 @@ defmodule Agentix.Agent do
   @type snapshot :: %{
           state: atom(),
           messages: [Message.t()],
+          history_cursor: non_neg_integer() | nil,
+          more?: boolean(),
           streaming_message:
             %{id: String.t(), text: String.t(), thinking: String.t(), seq: non_neg_integer()}
             | nil,
@@ -88,26 +90,52 @@ defmodule Agentix.Agent do
           pending: %{optional(String.t()) => map()}
         }
 
-  @doc """
-  A read-only snapshot for a (re)connecting UI: the finalized message history plus
-  the live turn state (current state, the in-progress assistant message's streamed
-  text, and the in-flight/pending tool calls).
+  @typedoc "A window of finalized messages plus a backward-pagination cursor."
+  @type history_page :: %{
+          messages: [Message.t()],
+          cursor: non_neg_integer() | nil,
+          more?: boolean()
+        }
 
-  Safe whether or not the agent is running — an absent agent reports an idle turn and
-  the history is read straight from the durable log. The live read never blocks the
-  turn loop (it only inspects in-memory turn state).
+  @doc """
+  A read-only snapshot for a (re)connecting UI: a window of the finalized message
+  history plus the live turn state (current state, the in-progress assistant message's
+  streamed text, and the in-flight/pending tool calls).
+
+  `opts` are the windowing options of `history/2` (`:limit`, `:before`); the snapshot
+  carries `:history_cursor` (oldest message's `seq`) and `:more?` so the consumer can
+  page older. Safe whether or not the agent is running — an absent agent reports an idle
+  turn and the history is read straight from the durable log. The live read never blocks
+  the turn loop (it only inspects in-memory turn state).
   """
-  @spec snapshot(String.t()) :: snapshot()
-  def snapshot(conversation_id) when is_binary(conversation_id) do
-    Map.put(live_turn(conversation_id), :messages, history(conversation_id))
+  @spec snapshot(String.t(), keyword()) :: snapshot()
+  def snapshot(conversation_id, opts \\ []) when is_binary(conversation_id) do
+    page = history(conversation_id, opts)
+
+    conversation_id
+    |> live_turn()
+    |> Map.put(:messages, page.messages)
+    |> Map.put(:history_cursor, page.cursor)
+    |> Map.put(:more?, page.more?)
   end
 
-  @doc "The finalized conversation rendered as `ReqLLM.Message`s, oldest first."
-  @spec history(String.t()) :: [Message.t()]
-  def history(conversation_id) when is_binary(conversation_id) do
-    conversation_id
-    |> Persistence.stream_events()
-    |> Enum.flat_map(&event_to_messages/1)
+  @doc """
+  A window of the finalized conversation rendered as `ReqLLM.Message`s, oldest first.
+  Options: `:limit` (most-recent N) and `:before` (exclusive `seq` upper bound) for
+  backward pagination — see `Agentix.Persistence`. Returns the messages plus `:cursor`
+  (the oldest loaded event's `seq`, `nil` when empty) and `:more?` (older events exist).
+  With no options it returns the whole conversation.
+  """
+  @spec history(String.t(), keyword()) :: history_page()
+  def history(conversation_id, opts \\ []) when is_binary(conversation_id) do
+    events = Persistence.stream_events(conversation_id, Keyword.take(opts, [:limit, :before]))
+    cursor = events |> Enum.map(& &1.seq) |> Enum.min(fn -> nil end)
+
+    %{
+      messages: Enum.flat_map(events, &event_to_messages/1),
+      cursor: cursor,
+      more?: cursor != nil and cursor > 1
+    }
   end
 
   defp live_turn(conversation_id) do
@@ -497,7 +525,7 @@ defmodule Agentix.Agent do
     drop_monitor(turn)
     Logger.warning("agentix stream failed: #{inspect(reason)}")
 
-    data = record_partial(data, " [stream error]")
+    data = record_partial(data, :error)
     Publisher.cancelled(data.publisher, turn.ref)
 
     :telemetry.execute(
@@ -519,7 +547,7 @@ defmodule Agentix.Agent do
     if is_function(turn.cancel, 0), do: turn.cancel.()
 
     data = cancel_tool_calls(data)
-    data = record_partial(data, " [cancelled]")
+    data = record_partial(data, :cancelled)
     Publisher.cancelled(data.publisher, turn.ref)
 
     :telemetry.execute(
@@ -534,16 +562,21 @@ defmodule Agentix.Agent do
   end
 
   # Persist whatever assistant text streamed so far as a (partial) assistant_msg, so
-  # every turn leaves a paired record. `suffix` marks why it is partial. The partial is
-  # broadcast as a completed message (same as a normal finish) so a connected client
+  # every turn leaves a paired record. `status` (`:cancelled`/`:error`) is recorded in the
+  # message metadata, not baked into the text, so the UI can render clean text plus its own
+  # badge; the model-context path re-applies a marker (see `mark_truncated/1`). The partial
+  # is broadcast as a completed message (same as a normal finish) so a connected client
   # keeps the streamed text instead of having it vanish when the turn resets.
-  defp record_partial(data, suffix) do
+  defp record_partial(data, status) do
     turn = data.turn
-    text = turn.text <> suffix
 
     message =
       put_msg_id(
-        %Message{role: :assistant, content: [ContentPart.text(text)]},
+        %Message{
+          role: :assistant,
+          content: [ContentPart.text(turn.text)],
+          metadata: %{"status" => to_string(status)}
+        },
         turn.msg_id
       )
 
@@ -1072,7 +1105,7 @@ defmodule Agentix.Agent do
   # afterward, past the breakpoint) stay within the window without busting the cache.
   defp assemble_context(data) do
     {summary, events} = Persistence.load_since(data.conversation_id)
-    history = Enum.flat_map(events, &event_to_messages/1)
+    history = events |> Enum.flat_map(&event_to_messages/1) |> Enum.map(&mark_truncated/1)
 
     (system_prefix(data.config) ++ summary_prefix(summary) ++ history)
     |> Context.new()
@@ -1141,6 +1174,19 @@ defmodule Agentix.Agent do
   end
 
   defp event_to_messages(_event), do: []
+
+  # Model-context only: a partial assistant turn stores its `status` in metadata (clean
+  # text for the UI). Re-append a short marker so the model still sees the turn was cut —
+  # the UI path (`history/2`) skips this and renders the clean text plus its own badge.
+  defp mark_truncated(%Message{metadata: %{"status" => status}} = message)
+       when status in ["cancelled", "error"] do
+    %{message | content: message.content ++ [ContentPart.text(truncation_marker(status))]}
+  end
+
+  defp mark_truncated(message), do: message
+
+  defp truncation_marker("cancelled"), do: " [turn cancelled]"
+  defp truncation_marker("error"), do: " [turn interrupted]"
 
   defp encode_result(result) when is_binary(result), do: result
   defp encode_result(result), do: Jason.encode!(result)

@@ -46,8 +46,15 @@ defmodule Agentix.Persistence do
   @callback append_event(conversation_id(), Event.t()) :: {:ok, seq()} | {:error, term()}
 
   @doc """
-  Returns the conversation's events ordered by ascending `seq`. Options: `:after`
-  (exclusive `seq` lower bound, default 0) and `:limit` (max events).
+  Returns the conversation's events ordered by ascending `seq`. Options:
+
+    * `:after` — exclusive `seq` lower bound (default 0);
+    * `:before` — exclusive `seq` upper bound (default unbounded);
+    * `:limit` — keep at most this many events, the **most recent** within the
+      `(after, before)` range (the tail), still returned in ascending order.
+
+  `:before` + `:limit` is the backward-pagination primitive: read the newest page,
+  then page older with `before:` set to the oldest `seq` already loaded.
   """
   @callback stream_events(conversation_id(), keyword()) :: [Event.t()]
 

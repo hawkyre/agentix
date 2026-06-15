@@ -78,6 +78,18 @@ defmodule Agentix.PersistenceConformance do
         assert conv |> @adapter.stream_events(after: 1) |> Enum.map(& &1.seq) == [2, 3]
       end
 
+      test "stream_events :before bounds above and :limit keeps the most-recent (tail)" do
+        conv = uid("conv")
+        for n <- 1..5, do: @adapter.append_event(conv, Event.new(:user_msg, %{n: n}))
+
+        # :before is an exclusive upper bound.
+        assert conv |> @adapter.stream_events(before: 3) |> Enum.map(& &1.seq) == [1, 2]
+        # :limit keeps the most recent N (the tail), still ascending.
+        assert conv |> @adapter.stream_events(limit: 2) |> Enum.map(& &1.seq) == [4, 5]
+        # Combined: the newest page below a cursor — backward pagination.
+        assert conv |> @adapter.stream_events(before: 4, limit: 2) |> Enum.map(& &1.seq) == [2, 3]
+      end
+
       test "load_since returns all events when there is no summary" do
         conv = uid("conv")
         {:ok, _} = @adapter.append_event(conv, Event.new(:user_msg, %{n: 1}))

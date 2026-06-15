@@ -7,8 +7,9 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     use Agentix.Chat
 
     @impl Phoenix.LiveView
-    def mount(_params, %{"conversation_id" => id}, socket) do
-      {:ok, attach_conversation(socket, id)}
+    def mount(_params, %{"conversation_id" => id} = session, socket) do
+      opts = if size = session["page_size"], do: [page_size: size], else: []
+      {:ok, attach_conversation(socket, id, opts)}
     end
 
     @impl Phoenix.LiveView
@@ -20,6 +21,8 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       <form id="composer" phx-submit="send">
         <input type="text" name="text" />
       </form>
+
+      <button :if={@agentix_more?} id="load-older" phx-click="load_older">load older</button>
 
       <div id="messages" phx-update="stream">
         <div :for={{dom_id, message} <- @streams.messages} id={dom_id} class="message">
@@ -36,9 +39,9 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         phx-update="ignore"
         data-msg-id={@streaming_message.id}
       >
+        <div data-agentix="thinking"></div>
+        <div data-agentix="text"></div>
       </div>
-
-      <div :if={@streaming_message} class="thinking">{@streaming_message.thinking}</div>
 
       <div :for={{id, entry} <- @pending} id={"pending-" <> id} class="pending">
         <span class="kind">{to_string(entry.kind)}</span>
@@ -59,6 +62,10 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
 
     def handle_event("cancel", _params, socket) do
       {:noreply, cancel(socket)}
+    end
+
+    def handle_event("load_older", _params, socket) do
+      {:noreply, load_older(socket)}
     end
 
     defp message_text(%ReqLLM.Message{content: content}) when is_list(content),

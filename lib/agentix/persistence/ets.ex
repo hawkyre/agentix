@@ -46,17 +46,24 @@ defmodule Agentix.Persistence.ETS do
   @impl true
   def stream_events(conversation_id, opts \\ []) do
     after_seq = Keyword.get(opts, :after, 0)
+    guards = [{:>, :"$1", after_seq} | before_guard(opts)]
 
     events =
       @events
-      |> :ets.select([
-        {{{conversation_id, :"$1"}, :"$2"}, [{:>, :"$1", after_seq}], [:"$2"]}
-      ])
+      |> :ets.select([{{{conversation_id, :"$1"}, :"$2"}, guards, [:"$2"]}])
       |> Enum.sort_by(& &1.seq)
 
     case Keyword.get(opts, :limit) do
+      # `:limit` keeps the most-recent N within the range (the tail), still ascending.
       nil -> events
-      limit -> Enum.take(events, limit)
+      limit -> Enum.take(events, -limit)
+    end
+  end
+
+  defp before_guard(opts) do
+    case Keyword.get(opts, :before) do
+      nil -> []
+      before -> [{:<, :"$1", before}]
     end
   end
 

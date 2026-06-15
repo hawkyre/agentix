@@ -48,7 +48,8 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
             send_message: 2,
             send_message: 3,
             resolve: 3,
-            cancel: 1
+            cancel: 1,
+            load_older: 1
           ]
 
         on_mount({unquote(__MODULE__), :default})
@@ -123,6 +124,13 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       Conversation.cancel(conversation_id(socket))
       socket
     end
+
+    @doc """
+    Loads one older page of history into the `:messages` stream (prepended). Gate the
+    host's affordance on the `:agentix_more?` assign; a no-op once the log start is reached.
+    """
+    @spec load_older(Socket.t()) :: Socket.t()
+    def load_older(socket), do: Projection.load_older(socket)
 
     defp handle_live_event(message, socket) do
       if Projection.live_event?(message) do

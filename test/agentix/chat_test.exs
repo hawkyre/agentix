@@ -8,6 +8,8 @@ defmodule Agentix.ChatTest do
   alias Agentix.Conversation
   alias Agentix.Conversation.Config
   alias Agentix.Events.Publisher
+  alias Agentix.Scope
+  alias Agentix.Test.ChatLive
   alias Agentix.Test.MockProvider
   alias Agentix.Tool
 
@@ -27,8 +29,7 @@ defmodule Agentix.ChatTest do
     :ok
   end
 
-  defp mount_chat(conn, id),
-    do: live_isolated(conn, Agentix.Test.ChatLive, session: %{"conversation_id" => id})
+  defp mount_chat(conn, id), do: live_isolated(conn, ChatLive, session: %{"conversation_id" => id})
 
   describe "mount + send_message" do
     test "streams a token delta to the hook and stream-inserts the finalized turn", ctx do
@@ -110,22 +111,49 @@ defmodule Agentix.ChatTest do
     end
   end
 
-  describe "delta deduplication" do
-    test "a stale delta (seq below what's already applied) is dropped, not re-appended", ctx do
+  describe "history pagination" do
+    test "seeds only the last page and pages older on demand", ctx do
+      start_conversation(ctx.id, [])
+
+      for n <- 1..3 do
+        MockProvider.script(completion("reply-#{n}"))
+        :ok = Conversation.send_message(ctx.id, "msg-#{n}", Scope.new())
+        assert_receive {:turn_completed, _ref}
+      end
+
+      # 6 messages (3 turns); a page of 2 events shows only the newest turn.
+      {:ok, view, _html} =
+        live_isolated(ctx.conn, ChatLive, session: %{"conversation_id" => ctx.id, "page_size" => 2})
+
+      html = render(view)
+      assert html =~ "reply-3"
+      refute html =~ "reply-1"
+      assert has_element?(view, "#load-older")
+
+      # Page back to the start; the control disappears at the head of the log.
+      view |> element("#load-older") |> render_click()
+      view |> element("#load-older") |> render_click()
+
+      html = render(view)
+      assert html =~ "reply-1"
+      assert html =~ "reply-3"
+      refute has_element?(view, "#load-older")
+    end
+  end
+
+  describe "streamed content" do
+    test "text and thinking deltas push to the hook tagged with kind and seq", ctx do
       start_conversation(ctx.id, [])
       {:ok, view, _html} = mount_chat(ctx.conn, ctx.id)
       ref = make_ref()
 
-      send(view.pid, {:thinking_delta, ref, "m1", "AAA", 0})
-      send(view.pid, {:thinking_delta, ref, "m1", "BBB", 1})
-      assert render(view) =~ "AAABBB"
+      # Both kinds stream to the JS hook (never assigns) carrying the per-message seq the
+      # hook uses to drop replayed deltas — the dedup itself lives client-side, like text.
+      send(view.pid, {:thinking_delta, ref, "m1", "reasoning", 0})
+      assert_push_event(view, "agentix:delta", %{kind: "thinking", chunk: "reasoning", seq: 0})
 
-      # A replayed delta (e.g. buffered across a reconnect) carries an already-applied
-      # seq and must be ignored rather than doubling the text.
-      send(view.pid, {:thinking_delta, ref, "m1", "AAA", 0})
-      html = render(view)
-      assert html =~ "AAABBB"
-      refute html =~ "AAABBBAAA"
+      send(view.pid, {:text_delta, ref, "m1", "answer", 1})
+      assert_push_event(view, "agentix:delta", %{kind: "text", chunk: "answer", seq: 1})
     end
   end
 

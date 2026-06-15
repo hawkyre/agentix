@@ -62,14 +62,26 @@ defmodule Agentix.ConversationTest do
 
   defp config(opts \\ []), do: Config.new(Keyword.merge([model: "mock:test"], opts))
 
-  defp assistant_text(id) do
+  defp request_text do
+    %{context: context} = List.last(MockProvider.requests())
+
+    context
+    |> ReqLLM.Context.to_list()
+    |> Enum.map_join("\n", fn message -> Enum.map_join(message.content, "", &(&1.text || "")) end)
+  end
+
+  defp assistant_text(id),
+    do: id |> last_assistant() |> Map.fetch!(:content) |> Enum.map_join("", & &1.text)
+
+  defp assistant_status(id),
+    do: id |> last_assistant() |> Map.fetch!(:metadata) |> Map.get("status")
+
+  defp last_assistant(id) do
     id
     |> Persistence.stream_events()
     |> Enum.filter(&(&1.type == :assistant_msg))
     |> List.last()
     |> then(fn event -> Codec.decode_message(event.content["message"]) end)
-    |> Map.fetch!(:content)
-    |> Enum.map_join("", & &1.text)
   end
 
   describe "send_message/3 — the turn loop" do
@@ -140,7 +152,9 @@ defmodule Agentix.ConversationTest do
       assert_receive {:cancelled, _ref}
       assert_receive {:state_changed, :idle}
 
-      assert assistant_text(id) == "partial [cancelled]"
+      # The partial text is stored clean; the truncation reason lives in metadata.
+      assert assistant_text(id) == "partial"
+      assert assistant_status(id) == "cancelled"
     end
 
     test "a second send while streaming returns {:error, :busy}", %{id: id} do
@@ -151,6 +165,23 @@ defmodule Agentix.ConversationTest do
       assert {:error, :busy} = Conversation.send_message(id, "again", Scope.new())
 
       Conversation.cancel(id)
+    end
+
+    test "the next turn's context re-shows a cancelled turn's truncation marker", %{id: id} do
+      {:ok, _pid} = Conversation.ensure_started(id, config: config())
+      :ok = Conversation.send_message(id, "Hi", Scope.new())
+      assert_receive {:text_delta, _ref, _msg_id, "partial", _seq}
+      assert :ok = Conversation.cancel(id)
+      assert_receive {:cancelled, _ref}
+
+      # The partial is stored clean; the model-context path re-applies the marker so the
+      # next turn's request shows the prior turn was cut.
+      install_mock_provider()
+      MockProvider.script(completion("ok"))
+      :ok = Conversation.send_message(id, "continue", Scope.new())
+      assert_receive {:turn_completed, _ref}
+
+      assert request_text() =~ "partial [turn cancelled]"
     end
   end
 

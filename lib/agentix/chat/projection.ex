@@ -6,11 +6,10 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     The assigns owned here:
 
       * `:messages` — a `Phoenix.LiveView.stream/3` of finalized `ReqLLM.Message`s;
-      * `:streaming_message` — `%{id, thinking, seq}` for the assistant message currently
-        being produced, or `nil`. Its **text is deliberately not an assign** — token
-        deltas are pushed to the JS hook so a growing string is never re-diffed
-        server-side; only the finalized message lands in `:messages`. `seq` is the
-        per-message delta counter used to drop replayed deltas (see below);
+      * `:streaming_message` — `%{id}` for the assistant message currently being produced,
+        or `nil`. Its **text and thinking are deliberately not assigns** — both stream as
+        deltas pushed to the JS hook (tagged with `kind`) so a growing string is never
+        re-diffed server-side; only the finalized message lands in `:messages`;
       * `:state` — the agent's current turn state, and `:streaming?` derived from it;
       * `:in_flight_tools` — `%{tool_call_id => %{name, executor, progress}}` (running
         tool dispatches only — a suspended tool moves to `:pending`);
@@ -26,7 +25,9 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     """
 
     import Phoenix.Component, only: [assign: 3, update: 3]
-    import Phoenix.LiveView, only: [connected?: 1, stream: 4, stream_insert: 3, push_event: 3]
+
+    import Phoenix.LiveView,
+      only: [connected?: 1, stream: 4, stream_insert: 3, stream_insert: 4, push_event: 3]
 
     alias Agentix.Agent
     alias Agentix.Events.Publisher
@@ -35,6 +36,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     alias ReqLLM.Message
 
     @conversation_assign :agentix_conversation_id
+    @default_page_size 50
 
     @live_event_tags ~w(state_changed turn_started text_delta thinking_delta message_completed
                         tool_call_started tool_progress tool_call_resolved tool_call_errored
@@ -60,10 +62,14 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         Phoenix.PubSub.subscribe(pubsub, Publisher.topic(conversation_id))
       end
 
-      snapshot = Agent.snapshot(conversation_id)
+      page_size = Keyword.get(opts, :page_size, @default_page_size)
+      snapshot = Agent.snapshot(conversation_id, limit: page_size)
 
       socket
       |> assign(@conversation_assign, conversation_id)
+      |> assign(:agentix_page_size, page_size)
+      |> assign(:agentix_oldest_seq, snapshot.history_cursor)
+      |> assign(:agentix_more?, snapshot.more?)
       |> assign(:state, snapshot.state)
       |> assign(:streaming?, streaming?(snapshot.state))
       |> assign(:in_flight_tools, snapshot.in_flight_tools)
@@ -71,6 +77,30 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       |> stream(:messages, snapshot.messages, dom_id: &dom_id/1)
       |> seed_streaming(snapshot.streaming_message)
     end
+
+    @doc """
+    Pages one older window into the `:messages` stream (prepended above the current
+    oldest), advancing `:agentix_oldest_seq` and `:agentix_more?`. A no-op when there is
+    nothing older.
+    """
+    @spec load_older(Socket.t()) :: Socket.t()
+    def load_older(%{assigns: %{agentix_more?: true, agentix_oldest_seq: cursor}} = socket)
+        when is_integer(cursor) do
+      conversation_id = socket.assigns[@conversation_assign]
+      page = Agent.history(conversation_id, before: cursor, limit: socket.assigns.agentix_page_size)
+
+      socket
+      # Insert oldest-last so the page ends up ascending above the existing messages.
+      |> then(
+        &Enum.reduce(Enum.reverse(page.messages), &1, fn m, acc ->
+          stream_insert(acc, :messages, m, at: 0)
+        end)
+      )
+      |> assign(:agentix_oldest_seq, page.cursor || cursor)
+      |> assign(:agentix_more?, page.more?)
+    end
+
+    def load_older(socket), do: socket
 
     @doc "Optimistically inserts a just-sent user message into the stream."
     @spec insert_user_message(Socket.t(), Message.t()) :: Socket.t()
@@ -94,18 +124,13 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     def apply_event(socket, {:text_delta, _turn_ref, msg_id, chunk, seq}) do
       socket
       |> ensure_streaming(msg_id)
-      |> push_event("agentix:delta", %{id: msg_id, chunk: chunk, seq: seq})
+      |> push_event("agentix:delta", %{id: msg_id, kind: "text", chunk: chunk, seq: seq})
     end
 
     def apply_event(socket, {:thinking_delta, _turn_ref, msg_id, chunk, seq}) do
-      socket = ensure_streaming(socket, msg_id)
-      sm = socket.assigns.streaming_message
-
-      if seq < sm.seq do
-        socket
-      else
-        assign(socket, :streaming_message, %{sm | thinking: sm.thinking <> chunk, seq: seq + 1})
-      end
+      socket
+      |> ensure_streaming(msg_id)
+      |> push_event("agentix:delta", %{id: msg_id, kind: "thinking", chunk: chunk, seq: seq})
     end
 
     def apply_event(socket, {:message_completed, _turn_ref, %Message{} = message}) do
@@ -180,15 +205,18 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     defp seed_streaming(socket, nil), do: assign(socket, :streaming_message, nil)
 
     defp seed_streaming(socket, %{id: id, text: text, thinking: thinking, seq: seq}) do
+      # Seed both content nodes from the snapshot; `seq` is the shared delta baseline, so a
+      # replayed delta of either kind (seq below it) is dropped by the hook.
       socket
-      |> assign(:streaming_message, %{id: id, thinking: thinking, seq: seq})
-      |> push_event("agentix:seed", %{id: id, text: text, seq: seq})
+      |> assign(:streaming_message, %{id: id})
+      |> push_event("agentix:seed", %{id: id, kind: "text", text: text, seq: seq})
+      |> push_event("agentix:seed", %{id: id, kind: "thinking", text: thinking, seq: seq})
     end
 
     defp ensure_streaming(socket, msg_id) do
       case socket.assigns[:streaming_message] do
         %{id: ^msg_id} -> socket
-        _ -> assign(socket, :streaming_message, %{id: msg_id, thinking: "", seq: 0})
+        _ -> assign(socket, :streaming_message, %{id: msg_id})
       end
     end
 
