@@ -60,13 +60,19 @@ defmodule Agentix.MixProject do
       # Phoenix/web deps; a zero-pubsub consumer sets `notifier: Agentix.Notifier.None`.
       {:phoenix_pubsub, "~> 2.2"},
 
+      # Optional — the LiveView layer (`Agentix.Chat`) compiles only when present.
+      # Headless/API consumers omit it entirely; its modules are conditionally defined.
+      {:phoenix_live_view, "~> 1.2", optional: true},
+
       # Dev/test tooling
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:styler, "~> 1.11", only: [:dev, :test], runtime: false},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
-      {:excoveralls, "~> 0.18", only: :test, runtime: false}
+      {:excoveralls, "~> 0.18", only: :test, runtime: false},
+      # `Phoenix.LiveViewTest` parses rendered markup through LazyHTML.
+      {:lazy_html, "~> 0.1", only: :test}
     ]
   end
 
@@ -86,7 +92,7 @@ defmodule Agentix.MixProject do
 
   defp dialyzer do
     [
-      plt_add_apps: [:ex_unit, :mix, :phoenix_pubsub],
+      plt_add_apps: [:ex_unit, :mix, :phoenix_pubsub, :phoenix_live_view],
       plt_local_path: "priv/plts",
       plt_core_path: "priv/plts",
       flags: [:error_handling, :extra_return, :missing_return, :unknown]
@@ -101,7 +107,7 @@ defmodule Agentix.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib mix.exs README.md CHANGELOG.md LICENSE .formatter.exs)
+      files: ~w(lib priv/static mix.exs README.md CHANGELOG.md LICENSE .formatter.exs)
     ]
   end
 

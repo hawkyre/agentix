@@ -77,6 +77,44 @@ defmodule Agentix.Agent do
   @spec via(String.t()) :: {:via, Registry, {Agentix.Registry, String.t()}}
   def via(conversation_id), do: {:via, Registry, {Agentix.Registry, conversation_id}}
 
+  @typedoc "A point-in-time view of a conversation for a (re)connecting consumer."
+  @type snapshot :: %{
+          state: atom(),
+          messages: [Message.t()],
+          streaming_message: %{id: String.t(), text: String.t(), thinking: String.t()} | nil,
+          in_flight_tools: %{optional(String.t()) => map()},
+          pending: %{optional(String.t()) => map()}
+        }
+
+  @doc """
+  A read-only snapshot for a (re)connecting UI: the finalized message history plus
+  the live turn state (current state, the in-progress assistant message's streamed
+  text, and the in-flight/pending tool calls).
+
+  Safe whether or not the agent is running — an absent agent reports an idle turn and
+  the history is read straight from the durable log. The live read never blocks the
+  turn loop (it only inspects in-memory turn state).
+  """
+  @spec snapshot(String.t()) :: snapshot()
+  def snapshot(conversation_id) when is_binary(conversation_id) do
+    Map.put(live_turn(conversation_id), :messages, history(conversation_id))
+  end
+
+  @doc "The finalized conversation rendered as `ReqLLM.Message`s, oldest first."
+  @spec history(String.t()) :: [Message.t()]
+  def history(conversation_id) when is_binary(conversation_id) do
+    conversation_id
+    |> Persistence.stream_events()
+    |> Enum.flat_map(&event_to_messages/1)
+  end
+
+  defp live_turn(conversation_id) do
+    case Registry.lookup(Agentix.Registry, conversation_id) do
+      [{_pid, _}] -> :gen_statem.call(via(conversation_id), :snapshot)
+      [] -> %{state: :idle, streaming_message: nil, in_flight_tools: %{}, pending: %{}}
+    end
+  end
+
   @doc false
   def child_spec(opts) do
     %{
@@ -295,6 +333,11 @@ defmodule Agentix.Agent do
   # or already resolved) is stale, not a crash.
   defp handle_common(_state, {:call, from}, {:resolve, _id, _result, _scope}, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :stale}}]}
+  end
+
+  # Read-only live turn view for `snapshot/1`, served from any state.
+  defp handle_common(state, {:call, from}, :snapshot, data) do
+    {:keep_state_and_data, [{:reply, from, live_turn_view(state, data)}]}
   end
 
   # Late tool-task signals from a finished/superseded turn.
@@ -796,6 +839,35 @@ defmodule Agentix.Agent do
       {id, %{executor: call.tool.executor, kind: phase_kind(call.tool, phase), prompt: call.args}}
     end
   end
+
+  # The in-memory turn projected for `snapshot/1`. The streamed text is reported only
+  # while an assistant message is being produced (`preparing`/`streaming`); once a turn
+  # is executing or awaiting tools its assistant message is already finalized in the log.
+  defp live_turn_view(state, %Data{turn: turn}) do
+    %{
+      state: state,
+      streaming_message: streaming_view(state, turn),
+      in_flight_tools: in_flight_view(turn),
+      pending: pending_view(turn)
+    }
+  end
+
+  defp streaming_view(state, %{} = turn) when state in [:preparing, :streaming],
+    do: %{id: turn.msg_id, text: turn.text, thinking: turn.thinking}
+
+  defp streaming_view(_state, _turn), do: nil
+
+  # Server tool calls dispatched and still running (suspended calls are `pending`).
+  defp in_flight_view(%{calls: calls}) do
+    for {id, %{phase: :running} = call} <- calls, into: %{} do
+      {id, %{name: call.name, executor: call.tool.executor, progress: nil}}
+    end
+  end
+
+  defp in_flight_view(_turn), do: %{}
+
+  defp pending_view(%{calls: calls}), do: pending_subset(calls)
+  defp pending_view(_turn), do: %{}
 
   defp build_turn(data, scope) do
     Turn.new(context: data.turn.context, turn_ref: data.turn.ref, scope: scope)
