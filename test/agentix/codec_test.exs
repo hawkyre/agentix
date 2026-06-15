@@ -132,6 +132,20 @@ defmodule Agentix.CodecTest do
     end
   end
 
+  describe "encode_tool_result/1" do
+    test "a binary passes through unchanged" do
+      assert Codec.encode_tool_result("plain text") == "plain text"
+    end
+
+    test "a map is JSON-encoded (the shared form for live + history tool rows)" do
+      assert Codec.encode_tool_result(%{ok: true, result: 42}) == ~s({"ok":true,"result":42})
+    end
+
+    test "a term with no Jason.Encoder falls back to inspect instead of raising" do
+      assert Codec.encode_tool_result({:a, :tuple}) == "{:a, :tuple}"
+    end
+  end
+
   describe "decode error handling" do
     test "an unknown provider raises a clear error" do
       assert_raise ArgumentError, ~r/unknown provider/, fn ->

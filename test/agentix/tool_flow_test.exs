@@ -31,6 +31,7 @@ defmodule Agentix.ToolFlowTest do
   alias Agentix.ToolFlowTest.ScriptProvider
   alias ReqLLM.Message
   alias ReqLLM.Message.ContentPart
+  alias ReqLLM.Provider.Defaults
   alias ReqLLM.ToolCall
 
   setup do
@@ -119,6 +120,11 @@ defmodule Agentix.ToolFlowTest do
         refute Map.has_key?(msg.metadata || %{}, key),
                "internal metadata #{inspect(key)} leaked to the model on a #{msg.role} message"
       end
+
+      # And the same at the wire level: the OpenAI-format encoder serializes
+      # `Message.metadata` verbatim, so a clean context must yield no `metadata` field.
+      body = Defaults.encode_context_to_openai_format(second_call.context, "gpt-x")
+      assert Enum.all?(body.messages, &(not Map.has_key?(&1, :metadata)))
 
       # The UI path (history/snapshot) keeps the metadata so components can render: a
       # named tool card, and a stable per-message stream id.

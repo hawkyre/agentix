@@ -38,10 +38,12 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       ]
 
     alias Agentix.Agent
+    alias Agentix.Codec
     alias Agentix.Events.Publisher
     alias Agentix.Persistence
     alias Phoenix.LiveView.Socket
     alias ReqLLM.Message
+    alias ReqLLM.Message.ContentPart
 
     @conversation_assign :agentix_conversation_id
     @default_page_size 50
@@ -174,10 +176,11 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       end)
     end
 
-    def apply_event(socket, {:tool_call_resolved, id, _result}), do: finalize_tool(socket, id, :ok)
+    def apply_event(socket, {:tool_call_resolved, id, result}),
+      do: finalize_tool(socket, id, :ok, result)
 
-    def apply_event(socket, {:tool_call_errored, id, _reason}),
-      do: finalize_tool(socket, id, :error)
+    def apply_event(socket, {:tool_call_errored, id, reason}),
+      do: finalize_tool(socket, id, :error, reason)
 
     def apply_event(socket, {:suspended, id, executor, prompt}) do
       entry = %{
@@ -252,7 +255,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     # permanent timeline item under the assistant turn, exactly like a completed message —
     # and leaves the live in-flight + pending sets. This makes the live turn converge with
     # what a reconnect/reload renders from history (`Agent.history/2`).
-    defp finalize_tool(socket, id, status) do
+    defp finalize_tool(socket, id, status, result) do
       # The id is in exactly one of the two sets: `in_flight_tools` for a running call,
       # `pending` for a suspended one (e.g. a denied approval). Either carries the name.
       name =
@@ -260,18 +263,20 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
           get_in(socket.assigns.pending, [id, :name])
 
       socket
-      |> stream_insert(:messages, tool_message(id, name, status))
+      |> stream_insert(:messages, tool_message(id, name, status, result))
       |> update(:in_flight_tools, &Map.delete(&1, id))
       |> update(:pending, &Map.delete(&1, id))
     end
 
-    # The default tool card renders only the name + status (the result body is never
-    # shown), so the live row carries no content. A reconnect/reload rebuilds the same
-    # row from history (`Agent.history/2`) keyed on the same `dom_id`, so they converge.
-    defp tool_message(id, name, status) do
+    # Built to match exactly what `Agent.history/2` produces for this tool result — same
+    # `dom_id` (keyed on the tool-call id), same content (the shared `Codec` encoder) and
+    # the same `tool_name`/`tool_status` metadata — so the live row and a reconnect/reload
+    # converge byte-for-byte.
+    defp tool_message(id, name, status, result) do
       %Message{
         role: :tool,
         tool_call_id: id,
+        content: [ContentPart.text(Codec.encode_tool_result(result))],
         metadata: %{"tool_name" => name, "tool_status" => to_string(status)}
       }
     end

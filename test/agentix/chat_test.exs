@@ -31,6 +31,23 @@ defmodule Agentix.ChatTest do
 
   defp mount_chat(conn, id), do: live_isolated(conn, ChatLive, session: %{"conversation_id" => id})
 
+  # The rendered message stream with the (per-mount, non-deterministic) stream dom-ids
+  # removed — what a reconnecting client must reproduce from history.
+  defp messages_html(view),
+    do: view |> element("#messages") |> render() |> String.replace(~r/ id="[^"]*"/, "")
+
+  defp scenario_tool(%{executor: :server, approval: approval, outcome: outcome}) do
+    callback =
+      if outcome == :error,
+        do: fn _args, _turn -> {:error, "boom"} end,
+        else: fn _args, _turn -> {:ok, "tool-result"} end
+
+    opts = [name: "thing", executor: :server, callback: callback]
+    Tool.new(if approval, do: Keyword.put(opts, :approval, :requires_approval), else: opts)
+  end
+
+  defp scenario_tool(%{executor: executor}), do: Tool.new(name: "thing", executor: executor)
+
   describe "mount + send_message" do
     test "streams a token delta to the hook and stream-inserts the finalized turn", ctx do
       start_conversation(ctx.id, [])
@@ -130,6 +147,70 @@ defmodule Agentix.ChatTest do
       # ...and a reconnecting client rebuilds the same row from history under the same id.
       {:ok, view2, _html} = mount_chat(build_conn(), ctx.id)
       assert has_element?(view2, "##{dom_id}")
+    end
+  end
+
+  describe "live ↔ reconnect convergence across tool lifecycles" do
+    @scenarios [
+      %{name: "server resolves ok", executor: :server, approval: false, outcome: :ok, resolve: nil},
+      %{
+        name: "server resolves error",
+        executor: :server,
+        approval: false,
+        outcome: :error,
+        resolve: nil
+      },
+      %{
+        name: "gated server approved",
+        executor: :server,
+        approval: true,
+        outcome: :ok,
+        resolve: :approve
+      },
+      %{
+        name: "gated server denied",
+        executor: :server,
+        approval: true,
+        outcome: :ok,
+        resolve: :deny
+      },
+      %{name: "human resolves", executor: :human, approval: false, outcome: :ok, resolve: "answer"},
+      %{
+        name: "client resolves",
+        executor: :client,
+        approval: false,
+        outcome: :ok,
+        resolve: %{"lat" => 1}
+      }
+    ]
+
+    for scenario <- @scenarios do
+      test "a never-disconnected client and a reconnect render the same stream — #{scenario.name}",
+           ctx do
+        scenario = unquote(Macro.escape(scenario))
+        start_conversation(ctx.id, tools: [scenario_tool(scenario)])
+
+        MockProvider.script([
+          completion("", tool_calls: [{"thing", %{}}]),
+          completion("final reply")
+        ])
+
+        {:ok, live, _html} = mount_chat(ctx.conn, ctx.id)
+        live |> form("#composer", %{"text" => "go"}) |> render_submit()
+
+        if scenario.resolve do
+          assert_receive {:suspended, tool_call_id, _executor, _prompt}
+          assert :ok = Agentix.resolve(ctx.id, tool_call_id, scenario.resolve)
+        end
+
+        assert_receive {:turn_completed, _ref}
+
+        # Force the live view to settle all events, then mount a fresh (reconnecting)
+        # client. The two must render an identical message stream.
+        _ = render(live)
+        {:ok, reconnect, _html} = mount_chat(build_conn(), ctx.id)
+        assert messages_html(live) == messages_html(reconnect)
+      end
     end
   end
 

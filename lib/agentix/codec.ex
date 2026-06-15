@@ -42,6 +42,22 @@ defmodule Agentix.Codec do
   @spec encode!(term()) :: binary()
   def encode!(value), do: Jason.encode!(value)
 
+  @doc """
+  Renders a tool result to the text a `:tool` message carries. A binary passes through;
+  anything else is JSON-encoded, falling back to `inspect/1` for terms without a
+  `Jason.Encoder` (an arbitrary tool return must never crash context assembly). Shared by
+  the model-history path and the live projection so a tool row reads identically in both.
+  """
+  @spec encode_tool_result(term()) :: binary()
+  def encode_tool_result(result) when is_binary(result), do: result
+
+  def encode_tool_result(result) do
+    case Jason.encode(result) do
+      {:ok, json} -> json
+      {:error, _reason} -> inspect(result)
+    end
+  end
+
   @doc "Decodes a JSON-decoded map into a `ReqLLM.Context` (messages only)."
   @spec decode_context(map()) :: Context.t()
   def decode_context(%{} = map) do

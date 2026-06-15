@@ -1190,7 +1190,7 @@ defmodule Agentix.Agent do
       %Message{
         role: :tool,
         tool_call_id: id,
-        content: [ContentPart.text(encode_result(result))],
+        content: [ContentPart.text(Codec.encode_tool_result(result))],
         metadata: %{"tool_name" => name, "tool_status" => to_string(tool_result_status(result))}
       }
     ]
@@ -1223,17 +1223,6 @@ defmodule Agentix.Agent do
 
   defp truncation_marker("cancelled"), do: " [turn cancelled]"
   defp truncation_marker("error"), do: " [turn interrupted]"
-
-  defp encode_result(result) when is_binary(result), do: result
-
-  defp encode_result(result) do
-    # Tool results are arbitrary terms; a struct without a `Jason.Encoder` would crash
-    # `assemble_context` (this feeds the model context every turn). Fall back to inspect.
-    case Jason.encode(result) do
-      {:ok, json} -> json
-      {:error, _reason} -> inspect(result)
-    end
-  end
 
   # UI status for a finalized tool result. Mirrors `result_status/1` but collapses to the
   # `:ok | :error` the `tool/1` component expects, and tolerates string keys (the Ecto
