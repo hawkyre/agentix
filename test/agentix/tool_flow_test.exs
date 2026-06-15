@@ -86,6 +86,39 @@ defmodule Agentix.ToolFlowTest do
       assert tool_result(id, "weather") == %{ok: true, result: "sunny in SF"}
       assert final_assistant_text(id) == "It is sunny."
     end
+
+    test "tool messages reach the model clean; UI metadata stays on the history path only",
+         %{id: id} do
+      weather =
+        Tool.new(
+          name: "weather",
+          executor: :server,
+          callback: fn args, _turn -> {:ok, "sunny in #{args["city"]}"} end
+        )
+
+      MockProvider.script([
+        completion("", tool_calls: [{"weather", %{"city" => "SF"}}]),
+        completion("It is sunny.")
+      ])
+
+      {:ok, _pid} = Conversation.ensure_started(id, config: config([weather]))
+      :ok = Conversation.send_message(id, "weather?", Scope.new())
+      assert_receive {:turn_completed, _ref}
+
+      # The second model call carries the tool result back to the provider. Its `:tool`
+      # message must be clean — UI metadata (`tool_name`/`tool_status`) on it would be
+      # serialized onto the OpenAI-format wire payload.
+      second_call = Enum.at(MockProvider.requests(), 1)
+      tool_msg = Enum.find(second_call.context.messages, &(&1.role == :tool))
+      assert tool_msg, "expected a tool message in the follow-up model context"
+      refute Map.has_key?(tool_msg.metadata || %{}, "tool_name")
+      refute Map.has_key?(tool_msg.metadata || %{}, "tool_status")
+
+      # The UI path (history/snapshot) decorates the same row so components can name it.
+      ui_tool = Enum.find(Agentix.Agent.history(id).messages, &(&1.role == :tool))
+      assert ui_tool.metadata["tool_name"] == "weather"
+      assert ui_tool.metadata["tool_status"] == "ok"
+    end
   end
 
   describe ":provider executor (pass-through, in-process)" do

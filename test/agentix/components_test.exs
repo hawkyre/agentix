@@ -53,8 +53,8 @@ defmodule Agentix.ComponentsTest do
       assert html =~ "lookup"
       refute html =~ ">Tool<"
 
-      # Only the assistant rows carry a role-header element; the CSS hides every one that
-      # follows another agent row, so exactly one header is visible per turn.
+      # Only the user + assistant rows carry a role-header element (the tool row has none);
+      # the CSS hides every one that follows another agent row, so one header shows per turn.
       assert count(html, "agentix-role-header") == 3
 
       assert Agentix.Components.css() =~

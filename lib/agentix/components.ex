@@ -455,7 +455,6 @@ if Code.ensure_loaded?(Phoenix.Component) do
 
     defp role_label(:user), do: "You"
     defp role_label(:assistant), do: "Assistant"
-    defp role_label(:tool), do: "Tool"
     defp role_label(role), do: role |> to_string() |> String.capitalize()
 
     defp message_text(%{content: parts}) when is_list(parts),

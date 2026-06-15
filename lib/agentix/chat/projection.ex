@@ -14,7 +14,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       * `:in_flight_tools` — `%{tool_call_id => %{name, executor, status}}` for calls still
         running (`status: :running`); a suspended call moves to `:pending`, and a resolved
         call moves into `:messages` as a finalized tool row (so live and reload converge);
-      * `:pending` — `%{tool_call_id => %{executor, kind, prompt}}` awaiting resolution.
+      * `:pending` — `%{tool_call_id => %{name, executor, kind, prompt}}` awaiting resolution.
 
     `attach/3` subscribes **before** reading the snapshot, so no event is lost in the
     gap. Keyed entities (stream dom-ids, tool-call ids, last-write-wins `state`) are
@@ -28,14 +28,20 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     import Phoenix.Component, only: [assign: 3, update: 3]
 
     import Phoenix.LiveView,
-      only: [connected?: 1, stream: 4, stream_insert: 3, stream_insert: 4, push_event: 3]
+      only: [
+        connected?: 1,
+        stream: 3,
+        stream_configure: 3,
+        stream_insert: 3,
+        stream_insert: 4,
+        push_event: 3
+      ]
 
     alias Agentix.Agent
     alias Agentix.Events.Publisher
     alias Agentix.Persistence
     alias Phoenix.LiveView.Socket
     alias ReqLLM.Message
-    alias ReqLLM.Message.ContentPart
 
     @conversation_assign :agentix_conversation_id
     @default_page_size 50
@@ -80,7 +86,9 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       # (tools, later streaming, pending) render headerless once it has, so a turn
       # never shows a second "Assistant" header.
       |> assign(:agentix_assistant_open, false)
-      |> stream(:messages, snapshot.messages, dom_id: &dom_id/1)
+      # `:dom_id` is configured here (not passed to `stream/4`, where it is undocumented).
+      |> stream_configure(:messages, dom_id: &dom_id/1)
+      |> stream(:messages, snapshot.messages)
       |> seed_streaming(snapshot.streaming_message)
     end
 
@@ -166,14 +174,16 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       end)
     end
 
-    def apply_event(socket, {:tool_call_resolved, id, result}),
-      do: finalize_tool(socket, id, :ok, result)
+    def apply_event(socket, {:tool_call_resolved, id, _result}), do: finalize_tool(socket, id, :ok)
 
-    def apply_event(socket, {:tool_call_errored, id, reason}),
-      do: finalize_tool(socket, id, :error, reason)
+    def apply_event(socket, {:tool_call_errored, id, _reason}),
+      do: finalize_tool(socket, id, :error)
 
     def apply_event(socket, {:suspended, id, executor, prompt}) do
       entry = %{
+        # Carry the name across the suspend so a denied call (which never re-broadcasts
+        # `tool_call_started`) can still finalize into a named tool row.
+        name: get_in(socket.assigns.in_flight_tools, [id, :name]),
         executor: executor,
         kind: prompt[:kind] || prompt["kind"],
         prompt: prompt_args(prompt)
@@ -242,26 +252,29 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     # permanent timeline item under the assistant turn, exactly like a completed message —
     # and leaves the live in-flight + pending sets. This makes the live turn converge with
     # what a reconnect/reload renders from history (`Agent.history/2`).
-    defp finalize_tool(socket, id, status, result) do
-      name = get_in(socket.assigns.in_flight_tools, [id, :name])
+    defp finalize_tool(socket, id, status) do
+      # The id is in exactly one of the two sets: `in_flight_tools` for a running call,
+      # `pending` for a suspended one (e.g. a denied approval). Either carries the name.
+      name =
+        get_in(socket.assigns.in_flight_tools, [id, :name]) ||
+          get_in(socket.assigns.pending, [id, :name])
 
       socket
-      |> stream_insert(:messages, tool_message(id, name, status, result))
+      |> stream_insert(:messages, tool_message(id, name, status))
       |> update(:in_flight_tools, &Map.delete(&1, id))
       |> update(:pending, &Map.delete(&1, id))
     end
 
-    defp tool_message(id, name, status, result) do
+    # The default tool card renders only the name + status (the result body is never
+    # shown), so the live row carries no content. A reconnect/reload rebuilds the same
+    # row from history (`Agent.history/2`) keyed on the same `dom_id`, so they converge.
+    defp tool_message(id, name, status) do
       %Message{
         role: :tool,
         tool_call_id: id,
-        content: [ContentPart.text(encode_result(result))],
         metadata: %{"tool_name" => name, "tool_status" => to_string(status)}
       }
     end
-
-    defp encode_result(result) when is_binary(result), do: result
-    defp encode_result(result), do: inspect(result)
 
     defp reset_turn(socket) do
       socket

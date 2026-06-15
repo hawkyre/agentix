@@ -132,7 +132,7 @@ defmodule Agentix.Agent do
     cursor = events |> Enum.map(& &1.seq) |> Enum.min(fn -> nil end)
 
     %{
-      messages: Enum.flat_map(events, &event_to_messages/1),
+      messages: Enum.flat_map(events, &event_to_ui_message/1),
       cursor: cursor,
       more?: cursor != nil and cursor > 1
     }
@@ -885,7 +885,13 @@ defmodule Agentix.Agent do
   # The renderer/persisted pending: only the awaiting-external subset.
   defp pending_subset(calls) do
     for {id, %{phase: phase} = call} <- calls, awaiting?(phase), into: %{} do
-      {id, %{executor: call.tool.executor, kind: phase_kind(call.tool, phase), prompt: call.args}}
+      {id,
+       %{
+         name: call.name,
+         executor: call.tool.executor,
+         kind: phase_kind(call.tool, phase),
+         prompt: call.args
+       }}
     end
   end
 
@@ -1160,32 +1166,36 @@ defmodule Agentix.Agent do
     Compaction.Budget.new(max(0, config.working_budget - config.injection_reserve))
   end
 
-  # Maps a log event to the messages the model sees. `:tool_call` events carry no
+  # Maps a log event to the messages the **model** sees. `:tool_call` events carry no
   # message of their own — the calls already ride on the assistant message — so they
-  # are skipped; `:tool_result` events become `:tool` role messages.
+  # are skipped; `:tool_result` events become clean `:tool` role messages. Deliberately
+  # carries no presentation metadata: this output is encoded onto the provider wire (the
+  # OpenAI-format encoder serializes `Message.metadata` verbatim), so UI decoration is
+  # added only on the UI path via `event_to_ui_message/1`.
   defp event_to_messages(%Event{type: type, content: content})
        when type in [:user_msg, :assistant_msg],
        do: [Codec.decode_message(content["message"] || content[:message])]
 
   defp event_to_messages(%Event{type: :tool_result, content: content}) do
     id = content["tool_call_id"] || content[:tool_call_id]
-    name = content["name"] || content[:name]
     result = content["result"] || content[:result]
-
-    # The name/status ride in metadata (namespaced to avoid the `"status"` key used by
-    # `mark_truncated`) so the UI can render a named tool card; the model still sees only
-    # the result text part.
-    [
-      %Message{
-        role: :tool,
-        tool_call_id: id,
-        content: [ContentPart.text(encode_result(result))],
-        metadata: %{"tool_name" => name, "tool_status" => to_string(tool_result_status(result))}
-      }
-    ]
+    [%Message{role: :tool, tool_call_id: id, content: [ContentPart.text(encode_result(result))]}]
   end
 
   defp event_to_messages(_event), do: []
+
+  # UI path (`history/2`, and the projection's reconnect seed through it): same messages
+  # the model sees, with a tool row decorated with `tool_name`/`tool_status` metadata so
+  # the default components can render a named card. Namespaced to avoid the `"status"`
+  # key `mark_truncated/1` keys on. The model path never sees this metadata.
+  defp event_to_ui_message(%Event{type: :tool_result, content: content} = event) do
+    name = content["name"] || content[:name]
+    status = content["result"] || content[:result]
+    decorate = %{"tool_name" => name, "tool_status" => to_string(tool_result_status(status))}
+    Enum.map(event_to_messages(event), &%{&1 | metadata: decorate})
+  end
+
+  defp event_to_ui_message(event), do: event_to_messages(event)
 
   # Model-context only: a partial assistant turn stores its `status` in metadata (clean
   # text for the UI). Re-append a short marker so the model still sees the turn was cut —
@@ -1201,7 +1211,15 @@ defmodule Agentix.Agent do
   defp truncation_marker("error"), do: " [turn interrupted]"
 
   defp encode_result(result) when is_binary(result), do: result
-  defp encode_result(result), do: Jason.encode!(result)
+
+  defp encode_result(result) do
+    # Tool results are arbitrary terms; a struct without a `Jason.Encoder` would crash
+    # `assemble_context` (this feeds the model context every turn). Fall back to inspect.
+    case Jason.encode(result) do
+      {:ok, json} -> json
+      {:error, _reason} -> inspect(result)
+    end
+  end
 
   # UI status for a finalized tool result. Mirrors `result_status/1` but collapses to the
   # `:ok | :error` the `tool/1` component expects, and tolerates string keys (the Ecto
