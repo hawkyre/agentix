@@ -100,18 +100,7 @@ if Code.ensure_loaded?(Phoenix.Component) do
           phx-hook="AgentixStream"
           phx-update="ignore"
           data-msg-id={@message.id}
-        >
-          <div
-            data-agentix="thinking"
-            class="whitespace-pre-wrap text-[13px] leading-relaxed text-neutral-500 empty:hidden dark:text-neutral-400"
-          >
-          </div>
-          <div
-            data-agentix="text"
-            class="caret whitespace-pre-wrap text-[14.5px] leading-relaxed text-neutral-700 dark:text-neutral-200"
-          >
-          </div>
-        </div>
+        ><div data-agentix="thinking" class="whitespace-pre-wrap text-[13px] leading-relaxed text-neutral-500 empty:hidden dark:text-neutral-400"></div><div data-agentix="text" class="caret whitespace-pre-wrap text-[14.5px] leading-relaxed text-neutral-700 dark:text-neutral-200"></div></div>
       </div>
       """
     end
