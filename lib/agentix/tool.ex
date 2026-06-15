@@ -2,7 +2,7 @@ defmodule Agentix.Tool do
   @moduledoc """
   A tool definition: its schema, who executes it, and how it is gated.
 
-  Two orthogonal axes (D4, inc-6-notes):
+  Two orthogonal axes:
 
     * **executor** — who produces the result: `:server` (your code, dispatched in a
       monitored task), `:human` (elicitation — the answer *is* the result),
@@ -13,9 +13,9 @@ defmodule Agentix.Tool do
       pre-exec suspend point, so both raise at definition time.
 
   `streaming?` is a property (a tool emitting progress during its own execution),
-  orthogonal to the executor. `retention` controls compaction eviction (Inc 8).
+  orthogonal to the executor. `retention` controls compaction eviction.
 
-  ## Schema pass-through (D5)
+  ## Schema pass-through
 
   `parameter_schema` is handed **verbatim** to `ReqLLM.Tool.new/1` (it already
   compiles NimbleOptions / JSON-Schema). Agentix never re-compiles or re-validates
@@ -99,6 +99,7 @@ defmodule Agentix.Tool do
   @doc false
   # Satisfies `ReqLLM.Tool.new/1`'s callback requirement; never invoked because the
   # agent loop dispatches every executor itself. Always raises by design.
+  @spec __provider_stub__(map()) :: no_return()
   @dialyzer {:nowarn_function, __provider_stub__: 1}
   def __provider_stub__(_args) do
     raise "Agentix tools are dispatched by the agent loop, not ReqLLM"

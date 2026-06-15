@@ -2,7 +2,7 @@ defmodule Agentix.Hook do
   @moduledoc """
   A hook: a function the agent runs around a model call, plus its metadata.
 
-  Two phases (D7, contracts.md):
+  Two phases:
 
     * **`:pre`** — runs in `preparing`, before the model call, on the assembled
       `%Agentix.Turn{}`. Sequential pre-hooks `(turn -> {:cont, turn} | {:halt, reason})`
@@ -10,29 +10,29 @@ defmodule Agentix.Hook do
       short-circuits the rest of the pipeline and the turn never reaches the model.
       Parallel pre-hooks are **append-only** `(turn -> {:cont, [ContentPart]})`: they
       run concurrently and their parts are appended, in declaration order, at the
-      **tail** of the context (cache-prefix safety, D7).
+      **tail** of the context (past the prompt-cache breakpoint).
     * **`:post`** — runs after the assistant message finalizes (`:message_completed`),
       on a turn carrying the finalized `assistant_message`. `(turn -> {:cont, turn} |
-      {:halt, reason})`; side-effecting in v0.
+      {:halt, reason})`; side-effecting.
 
-  ## Injection budget (D7)
+  ## Injection budget
 
   Pre-hook injections are bounded by the conversation's `injection_reserve`. If the
   injected content exceeds it, the pipeline raises `Agentix.Hook.OverflowError`
   naming the offending hook — a loud config error, **not** a trigger for compaction
   (the two subsystems are independent; compaction is never re-entered to make room).
 
-  ## `durable?` (pinned for v0)
+  ## `durable?`
 
-  Hook output is **transient** in v0: pre-hook injections ride only the per-model-call
+  Hook output is **transient**: pre-hook injections ride only the per-model-call
   rendered context (so they reach the optional `model_calls` audit table) and are
   regenerated each assembly — never written to the canonical event log. The
   `durable?` field is part of the contract and is validated, but durable
   log-persistence of hook output (appending it as a normal event) is **deferred** to
-  the layer that owns the event-shape/compaction (Inc 8/11): it needs a data-model
-  decision (a dedicated event type vs. overloading `:user_msg`) that does not belong
-  in the loop. A `durable?: true` hook therefore behaves identically to a transient
-  one in v0; consumers must not yet rely on persistence. See inc-7-notes.
+  the layer that owns the event-shape/compaction: it needs a data-model decision (a
+  dedicated event type vs. overloading `:user_msg`) that does not belong in the loop.
+  A `durable?: true` hook therefore currently behaves identically to a transient one;
+  consumers must not yet rely on persistence.
 
   Hooks (and the stream transformer) are functions and are **not** JSON-serializable;
   like tool callbacks they live in the conversation config and are rebuilt from it on

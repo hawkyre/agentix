@@ -7,8 +7,8 @@ defmodule Agentix.Conversation do
   `Agentix.ConversationSupervisor`. Both new messages and resolutions enter through
   it, so a conversation killed mid-flight is revived transparently on the next call.
 
-  v0 is single-in-flight: a `send_message/3` while a turn is running returns
-  `{:error, :busy}`.
+  A conversation is single-in-flight: a `send_message/3` while a turn is running
+  returns `{:error, :busy}`.
   """
 
   alias Agentix.Agent

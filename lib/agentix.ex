@@ -8,9 +8,6 @@ defmodule Agentix do
   on [ReqLLM](https://hexdocs.pm/req_llm) for provider abstraction and the
   canonical typed model (`Context`, `Message`, `ContentPart`, `Tool`,
   `StreamChunk`, `Response`, `Usage`).
-
-  This is the pre-implementation scaffold; see the design docs for architecture
-  and v0 scope.
   """
 
   alias Agentix.Resolve

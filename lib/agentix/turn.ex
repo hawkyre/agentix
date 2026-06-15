@@ -1,13 +1,13 @@
 defmodule Agentix.Turn do
   @moduledoc """
-  The per-turn context handed to `:server` tool callbacks (and, in Inc 7, hooks).
+  The per-turn context handed to `:server` tool callbacks and to hooks.
 
   A turn carries the assembled `context` sent to the model, the `user_message` that
   opened the turn, an opaque `turn_ref`, and the `scope` of the caller who is acting
   this turn. The scope is **enforced** — a turn always carries one (system scope for
   timeout/recovery-driven turns).
 
-  Two fields serve the hook pipeline (Inc 7): `injections` accumulates the
+  Two fields serve the hook pipeline: `injections` accumulates the
   `ContentPart`s a pre-hook adds (appended at the context tail at assembly time, via
   `Agentix.Hook.inject/2`), and `assistant_message` carries the finalized message to a
   post-hook (`nil` for pre-hooks and tool callbacks).

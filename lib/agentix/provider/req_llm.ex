@@ -18,7 +18,7 @@ defmodule Agentix.Provider.ReqLLM do
       individual `StreamChunk`s) survive. Call it **after** `chunks` is consumed.
 
   Streaming pools are HTTP/1-only by default (Finch ALPN bug with mixed-protocol
-  large bodies); do not chase HTTP/2 streaming concurrency in v0.
+  large bodies).
   """
 
   @behaviour Agentix.Provider

@@ -1,7 +1,11 @@
 defmodule Agentix.Compaction.SlidingWindow do
   @moduledoc """
-  Caps the dialogue tail to the last `compaction_window` turns — the second
-  deterministic, every-assembly reducer (Inc 8).
+  Caps the dialogue tail to the last `compaction_window` turns.
+
+  **Not wired into the assembly path today:** keeping the rendered tail append-only
+  between turns is what makes the prompt cache effective, so per-turn trimming is
+  deliberately avoided (summarization is the sole shrink). This reducer is kept and
+  tested for a future discrete, boundary-aligned variant.
 
   Works at **turn** granularity (a turn = a user message plus the assistant/tool
   messages that follow it, up to the next user message), so dropping old turns can

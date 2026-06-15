@@ -2,7 +2,7 @@ defmodule Agentix.Hook.OverflowError do
   @moduledoc """
   Raised when a pre-hook injects more content than the conversation's
   `injection_reserve` allows. Names the offending hook. A loud config error — the
-  injection/compaction subsystems are independent (D7), so this never triggers
+  injection/compaction subsystems are independent, so this never triggers
   compaction.
   """
 

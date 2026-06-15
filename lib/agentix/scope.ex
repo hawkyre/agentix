@@ -1,7 +1,7 @@
 defmodule Agentix.Scope do
   @moduledoc """
   The caller's authorization/context, passed per entry-verb call (`send_message/3`,
-  `resolve/4`) and threaded into `:server` tool callbacks via `Agentix.Turn` (Inc 6).
+  `resolve/4`) and threaded into `:server` tool callbacks via `Agentix.Turn`.
 
   A scope is **per-call and never persisted** — it reflects who is acting *now*, not
   conversation state. Two flavours:

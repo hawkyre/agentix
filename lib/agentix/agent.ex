@@ -3,7 +3,7 @@ defmodule Agentix.Agent do
   The per-conversation agent — one `:gen_statem` process per conversation, addressed
   through `Agentix.Registry` and started under `Agentix.ConversationSupervisor`.
 
-  ## States (v0 turn loop)
+  ## States (turn loop)
 
       idle ─send_message─> preparing ─> streaming ─done(no tools)─> idle
                                           │
@@ -29,7 +29,7 @@ defmodule Agentix.Agent do
 
   The append-only event log (`Agentix.Persistence`) is the source of truth; the
   agent rebuilds its working context from the log every turn and re-reads the max
-  `seq` on revival (D9). On `ensure_started` a log ending in a dangling `:user_msg`
+  `seq` on revival. On `ensure_started` a log ending in a dangling `:user_msg`
   (killed mid-stream, nothing dispatched) is **re-run** — no side effects happened.
   """
 
@@ -549,8 +549,8 @@ defmodule Agentix.Agent do
     |> do_record_result(id, %{ok: false, error: "unknown tool: #{name}"})
   end
 
-  # Provider-hosted: resolves in-stream. v0 records a pass-through result and never
-  # dispatches it locally (full provider-tool round-trip is post-v0).
+  # Provider-hosted: resolves in-stream. Records a pass-through result and never
+  # dispatches it locally (a full provider-tool round-trip is not yet implemented).
   defp start_call(data, id, name, %Tool{executor: :provider} = tool, args) do
     data
     |> update_call(id, call_entry(tool, name, args, :done))
@@ -871,7 +871,7 @@ defmodule Agentix.Agent do
       {:ok, stream} ->
         send(agent, {:stream_started, turn_ref, stream.cancel})
 
-        # The stream-transformer seam (Inc 7): one `(chunk -> chunk)` pass per chunk
+        # The stream-transformer seam: one `(chunk -> chunk)` pass per chunk
         # (identity when unset), applied here at the provider seam before forwarding.
         Enum.each(stream.chunks, fn chunk ->
           send(agent, {:chunk, turn_ref, Hook.transform_chunk(chunk, transformer)})
@@ -897,18 +897,16 @@ defmodule Agentix.Agent do
     put_in(data.turn.thinking, turn.thinking <> text)
   end
 
-  # :tool_call chunks carry no id (harvested post-stream in Inc 6); :meta is noise.
+  # :tool_call chunks carry no id (harvested post-stream from the assistant message);
+  # :meta is noise.
   defp handle_chunk(_chunk, data), do: data
 
-  ## Hook pipeline (Inc 7)
+  ## Hook pipeline
 
-  # Run the pre-pipeline, converting an overflow or a crash into a turn halt (rather
-  # than crashing the agent into a restart loop). The OverflowError is still *raised*
-  # by the pipeline — the loud signal lives there; the FSM only declines to crash.
-  # The OverflowError is *raised* by the pipeline (the loud signal); the FSM rescues it
-  # into a turn halt rather than crashing into a restart loop. Only the exception
-  # *message* (not the struct) reaches the halt reason → telemetry, to avoid leaking
-  # closure-captured data into metrics handlers.
+  # Run the pre-pipeline. The OverflowError is *raised* by the pipeline (the loud
+  # signal); the FSM rescues it into a turn halt rather than crashing into a restart
+  # loop. Only the exception *message* (not the struct) reaches the halt reason →
+  # telemetry, to avoid leaking closure-captured data into metrics handlers.
   defp run_pre_hooks(data, base) do
     config = data.config
     turn = build_hook_turn(data, base)
@@ -958,7 +956,7 @@ defmodule Agentix.Agent do
     Enum.find(Enum.reverse(messages), &match?(%Message{role: :user}, &1))
   end
 
-  # Place pre-hook injections at the context tail (cache-prefix safety, D7): append
+  # Place pre-hook injections at the context tail (past the cache breakpoint): append
   # them to the final user message's content when there is one (keeping the tail a
   # single user message), else as a trailing user message (e.g. a tool-loop step).
   defp apply_injections(context, []), do: context
@@ -977,18 +975,50 @@ defmodule Agentix.Agent do
     end
   end
 
-  ## Context assembly + compaction (Inc 8)
+  ## Context assembly + compaction
 
-  # Read "latest summary + events after it" (load_since), render to messages, then run
-  # the free compaction reducers to fit the budget. With no summary this is identical
-  # to streaming all events. The injection reserve is carved out of the budget so
-  # pre-hook injections (added at the tail afterward) stay within the window (D7).
+  # Read "latest summary + events after it" (load_since), render to messages, compact
+  # to fit the budget, then mark the prompt-cache breakpoint at the stable-prefix
+  # boundary. With no summary this is identical to streaming all events. The injection
+  # reserve is carved out of the budget so pre-hook injections (added at the tail
+  # afterward, past the breakpoint) stay within the window without busting the cache.
   defp assemble_context(data) do
     {summary, events} = Persistence.load_since(data.conversation_id)
     history = Enum.flat_map(events, &event_to_messages/1)
-    base = Context.new(system_prefix(data.config) ++ summary_prefix(summary) ++ history)
-    Compaction.compact(base, compaction_budget(data.config), data.config)
+
+    (system_prefix(data.config) ++ summary_prefix(summary) ++ history)
+    |> Context.new()
+    |> Compaction.compact(compaction_budget(data.config), data.config)
+    |> place_cache_breakpoint()
   end
+
+  # Mark a prompt-cache breakpoint on the stable prefix: the last content part of the
+  # last leading system message (the summary message when present, else the system
+  # prompt). Everything up to that block is byte-stable across turns — it changes only
+  # when a new summary is written — so providers serve it from cache; the verbatim tail
+  # and tail-appended injections sit past the breakpoint. No leading system message
+  # means there is no stable prefix worth caching, so the context is returned as-is.
+  # The marker rides `ContentPart.metadata` (honored by providers that support prompt
+  # caching, ignored by those that don't) and is added per-assembly — never persisted.
+  defp place_cache_breakpoint(%Context{messages: messages} = context) do
+    case Enum.split_while(messages, &system_message?/1) do
+      {[], _rest} -> context
+      {system, rest} -> %{context | messages: mark_last(system) ++ rest}
+    end
+  end
+
+  defp system_message?(%Message{role: :system}), do: true
+  defp system_message?(_message), do: false
+
+  defp mark_last(messages), do: List.replace_at(messages, -1, mark_message(List.last(messages)))
+
+  defp mark_message(%Message{content: []} = message), do: message
+
+  defp mark_message(%Message{content: parts} = message),
+    do: %{message | content: List.replace_at(parts, -1, mark_part(List.last(parts)))}
+
+  defp mark_part(%ContentPart{metadata: metadata} = part),
+    do: %{part | metadata: Map.put(metadata || %{}, :cache_control, %{type: "ephemeral"})}
 
   defp system_prefix(config) do
     case config.system_prompt do
@@ -1035,7 +1065,7 @@ defmodule Agentix.Agent do
 
   # A log ending in a `:user_msg` was killed after recording the message but before
   # the assistant reply — re-run the turn under the system scope. Any other tail is
-  # already resolved (or handled by Inc 6 for dangling tool calls).
+  # already resolved (dangling tool-call revival is handled by the durable adapter).
   defp recover([]), do: {:idle, []}
 
   defp recover(events) do

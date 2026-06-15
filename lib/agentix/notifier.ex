@@ -1,7 +1,7 @@
 defmodule Agentix.Notifier do
   @moduledoc """
   The seam for the **live event plane** — the lossy, never-canonical stream of
-  deltas, state changes, and progress the renderer projects (D6/D11).
+  deltas, state changes, and progress the renderer projects.
 
   Canonical history is the event log (`Agentix.Persistence`); the notifier carries
   only the live tail. Two implementations ship:

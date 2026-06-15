@@ -1,9 +1,9 @@
 defmodule Agentix.Compaction.Budget do
   @moduledoc """
-  The opaque budget value threaded through the compaction reducers (Inc 8).
+  The opaque budget value threaded through the compaction reducers.
 
   Carries the `total` token target and a `caps` map reserved for **per-tier
-  sub-limits** (e.g. `%{tool_results: 5_000, dialogue: 20_000}`) — a v0.1 feature.
+  sub-limits** (e.g. `%{tool_results: 5_000, dialogue: 20_000}`) — a future feature.
   The point of wrapping a plain integer in a struct now is that adding those
   sub-limits later must **not** change the `reduce(context, budget, state)` signature
   the reducers implement.

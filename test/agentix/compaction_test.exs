@@ -127,6 +127,24 @@ defmodule Agentix.CompactionTest do
     end
   end
 
+  describe "Compaction.compact/3" do
+    test "returns the context unchanged (free reducers are not wired into the assembly path)" do
+      config = Config.new(model: "m", tool_retention: %{mode: :age, value: 1}, compaction_window: 1)
+
+      context =
+        Context.new([
+          user("q1"),
+          calls("", [tc("c1", "search")]),
+          result("c1", "OLD"),
+          user("q2"),
+          assistant("done")
+        ])
+
+      # Tiny budget would have triggered the old reducers; now it's a pure pass-through.
+      assert Agentix.Compaction.compact(context, Budget.new(1), config) == context
+    end
+  end
+
   describe "SlidingWindow — keep the prefix and the last W turns" do
     test "drops whole old turns (never orphaning a tool pair)" do
       config = Config.new(model: "m", compaction_window: 2)

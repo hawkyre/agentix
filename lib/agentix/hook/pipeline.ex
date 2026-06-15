@@ -1,6 +1,6 @@
 defmodule Agentix.Hook.Pipeline do
   @moduledoc """
-  Runs the hook pipelines around a model call (D7).
+  Runs the hook pipelines around a model call.
 
   `run_pre/3` runs the pre-hooks against the assembled turn: sequential hooks first
   (in declaration order, each may transform the turn or `:halt`, short-circuiting the
@@ -8,14 +8,13 @@ defmodule Agentix.Hook.Pipeline do
   appended in declaration order). After every hook that injects, the cumulative
   injection is checked against `injection_reserve`; an overflow raises
   `Agentix.Hook.OverflowError` naming that hook (the check happens once — compaction
-  is never re-entered, D7).
+  is never re-entered).
 
   `run_post/2` runs the post-hooks sequentially after the assistant message finalizes.
 
   A pre-hook injects by appending to `turn.injections` via `Agentix.Hook.inject/2`;
-  the agent places those parts at the context tail at assembly time (cache-prefix
-  safety). v0 sizes injections with a `byte/4` token heuristic; Inc 8's
-  `Agentix.Tokenizer` behaviour will replace it (see inc-7-notes).
+  the agent places those parts at the context tail at assembly time (past the
+  prompt-cache breakpoint). Injections are sized via `Agentix.Tokenizer`.
   """
 
   alias Agentix.Hook
@@ -128,7 +127,7 @@ defmodule Agentix.Hook.Pipeline do
     :ok
   end
 
-  # Sized via the shared Agentix.Tokenizer (Inc 8) so the injection reserve and the
+  # Sized via the shared Agentix.Tokenizer so the injection reserve and the
   # compaction budget speak the same units. Non-text parts cost 0 here.
   defp injection_tokens(parts), do: parts |> Enum.map(&part_tokens/1) |> Enum.sum()
 

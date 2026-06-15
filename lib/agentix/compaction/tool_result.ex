@@ -1,7 +1,12 @@
 defmodule Agentix.Compaction.ToolResult do
   @moduledoc """
-  Tool-result retention — the first, deterministic, every-assembly reducer (Inc 8).
-  The fattest target in tool-heavy conversations.
+  Tool-result retention — stubs expired tool results to shrink the fattest target in
+  tool-heavy conversations.
+
+  **Not wired into the assembly path today:** per-turn trimming mutates already-sent
+  history and breaks the provider prompt cache, so the rendered tail is kept
+  append-only between turns (summarization is the sole shrink). This reducer is kept
+  and tested for a future discrete, boundary-aligned variant.
 
   An expired result is **stubbed, not dropped**: its content becomes `[result
   expired]`. A `tool_call` and its `tool_result` are a pair (providers reject

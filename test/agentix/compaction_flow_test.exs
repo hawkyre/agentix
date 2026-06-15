@@ -133,6 +133,46 @@ defmodule Agentix.CompactionFlowTest do
     end
   end
 
+  describe "prompt-cache breakpoint" do
+    test "marks the stable-prefix (summary) boundary, byte-stable across turns", %{id: id} do
+      seed_turn(id, "alpha-q", "alpha-a")
+      seed_turn(id, "bravo-q", "bravo-a")
+      put_summary(id, 2, "PRIOR-SUMMARY")
+
+      MockProvider.script([completion("ok-one"), completion("ok-two")])
+      {:ok, _pid} = Conversation.ensure_started(id, config: config(id, working_budget: 30_000))
+
+      :ok = Conversation.send_message(id, "q-one", Scope.new())
+      assert_receive {:turn_completed, _ref}
+      :ok = Conversation.send_message(id, "q-two", Scope.new())
+      assert_receive {:turn_completed, _ref}
+
+      [req1, req2] = MockProvider.requests()
+
+      # The summary :system message is the stable-prefix boundary; its last content
+      # part carries the cache_control marker.
+      boundary = Enum.find(req1.context.messages, &(&1.role == :system))
+      assert List.last(boundary.content).metadata[:cache_control] == %{type: "ephemeral"}
+
+      # The marked prefix (everything up to and including the boundary) is byte-stable
+      # across the two turns — only the appended tail differs.
+      assert system_prefix(req1.context.messages) == system_prefix(req2.context.messages)
+    end
+
+    test "no breakpoint when there is no system prompt and no summary", %{id: id} do
+      MockProvider.script(completion("ok"))
+      {:ok, _pid} = Conversation.ensure_started(id, config: config(id, []))
+
+      :ok = Conversation.send_message(id, "hi", Scope.new())
+      assert_receive {:turn_completed, _ref}
+
+      %{context: %Context{messages: messages}} = List.last(MockProvider.requests())
+      refute Enum.any?(messages, fn m -> Enum.any?(m.content, & &1.metadata[:cache_control]) end)
+    end
+  end
+
+  defp system_prefix(messages), do: Enum.take_while(messages, &(&1.role == :system))
+
   defp config(_id, opts), do: Config.new(Keyword.merge([model: "mock:test"], opts))
   defp pad, do: String.duplicate("x", 48)
 end

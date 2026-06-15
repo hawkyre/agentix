@@ -1,11 +1,11 @@
 defmodule Agentix.Tokenizer do
   @moduledoc """
-  Approximate token counting for budgeting the assembled context (Inc 8).
+  Approximate token counting for budgeting the assembled context.
 
   Exact counts only come back from the provider *after* a call and are
   model-specific; ReqLLM exposes no public count API, so Agentix owns a
   pre-send estimate. This is a **behaviour** with a default
-  `Agentix.Tokenizer.Heuristic` (char/4). A real tokenizer (a tiktoken NIF, etc.)
+  `Agentix.Tokenizer.Heuristic` (a byte-count estimate). A real tokenizer (a tiktoken NIF, etc.)
   is a later optional adapter behind the same behaviour — selected via
   `config :agentix, :tokenizer, MyTokenizer`.
 

@@ -1,34 +1,39 @@
 defmodule Agentix.Compaction do
   @moduledoc """
-  Fits the **rendered context** to a token budget (Inc 8). Operates on a projection
-  of the log, never the log itself — the log is immutable; compaction is how a turn's
-  context is shaped to fit, so replay stays faithful.
+  Fits the **rendered context** to a token budget. Operates on a projection of the
+  log, never the log itself — the log is immutable; compaction shapes a turn's
+  context to fit, so replay stays faithful.
 
-  Independent of injection (Inc 7); the only shared thing is the token budget,
-  applied to the final rendered context. Assembly layout (cache-prefix discipline):
+  Compaction and pre-message injection are independent; the only thing they share is
+  the token budget, applied to the final rendered context. The assembly layout keeps
+  the provider prompt cache warm:
 
-      [ stable prefix: system prompt + latest summary ]   ← cached, byte-stable
-      [ verbatim history tail (recent messages) ]          ← byte-stable
-      [ per-turn injected content adjacent to the user msg ] ← only changing region
+      [ stable prefix: system prompt + latest summary ]    ← cached, byte-stable
+      [ verbatim history tail (recent messages) ]          ← append-only, byte-stable
+      [ per-turn injected content adjacent to the user msg ] ← the only changing region
 
-  ## Reducer contract
+  A cache breakpoint is marked at the end of the stable prefix; it moves only when a
+  new summary is written.
 
-  A reducer implements `reduce(context, budget, state) :: {context, state}`. The free,
-  deterministic reducers run on **every** assembly, cheap → expensive:
+  ## Reducers
 
-    1. `Agentix.Compaction.ToolResult` — stub expired tool results (pairing intact).
-    2. `Agentix.Compaction.SlidingWindow` — cap the dialogue tail to a turn window.
+  A reducer implements `reduce(context, budget, state) :: {context, state}`, and
+  `compact/3` runs the free, deterministic reducers in order. **None are wired into
+  the assembly path today**: keeping the rendered tail append-only between turns is
+  what makes the prompt cache effective, so per-turn trimming is deliberately
+  avoided. `Agentix.Compaction.ToolResult` and `Agentix.Compaction.SlidingWindow`
+  remain available (and tested) for a future discrete, boundary-aligned variant.
 
-  Summarization (`Agentix.Compaction.Summarize`) is the only model-calling, lossy
-  reducer; it is **not** in this synchronous pipeline. It runs asynchronously between
-  turns (`maybe_summarize/2` at turn end) only when the free reducers leave the
-  context over budget, writing a prefix-ward `summaries` row the next assembly reads.
+  The sole context shrink is **summarization** (`Agentix.Compaction.Summarize`): a
+  lossy, model-calling reducer that runs asynchronously between turns, only when the
+  context is over budget, collapsing the oldest turns prefix-ward into a growing
+  front summary. That summary is the one part of the stable prefix that changes — a
+  rare, discrete event the cache breakpoint is aligned to. `over_budget?/2` is the
+  trigger.
   """
 
   alias Agentix.Compaction.Budget
-  alias Agentix.Compaction.SlidingWindow
   alias Agentix.Compaction.State
-  alias Agentix.Compaction.ToolResult
   alias Agentix.Conversation.Config
   alias Agentix.Tokenizer
   alias ReqLLM.Context
@@ -43,11 +48,16 @@ defmodule Agentix.Compaction do
     defstruct [:config]
   end
 
-  @free_reducers [ToolResult, SlidingWindow]
+  # The free, deterministic reducers, run in order by `compact/3`. Empty today — the
+  # rendered tail is kept append-only between turns so the prompt cache stays warm;
+  # summarization is the sole (discrete, between-turns) context shrink (see moduledoc).
+  @free_reducers []
 
   @doc """
   Runs the free, deterministic reducers over `context` (cheap → expensive), threading
-  the budget and per-reducer state. Returns the reduced context.
+  the budget and per-reducer state, and returns the reduced context. With no free
+  reducers wired in, returns `context` unchanged (summarization, off the assembly
+  path, does the shrinking).
   """
   @spec compact(Context.t(), Budget.t(), Config.t()) :: Context.t()
   def compact(%Context{} = context, %Budget{} = budget, %Config{} = config) do

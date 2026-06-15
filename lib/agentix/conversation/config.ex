@@ -1,24 +1,26 @@
 defmodule Agentix.Conversation.Config do
   @moduledoc """
-  Per-conversation configuration: which model, the system prompt, the (v0 fixed)
+  Per-conversation configuration: which model, the system prompt, the (fixed)
   tool list, and runtime knobs.
 
   The runtime knobs mirror the install/config contract:
 
     * `working_budget` — token budget for the assembled context.
-    * `injection_reserve` — token budget reserved for pre-hook injections (D7);
+    * `injection_reserve` — token budget reserved for pre-hook injections;
       over-reserve injection is a loud `Agentix.Hook.OverflowError`.
-    * `tool_retention` — global default tool-result retention (compaction, Inc 8):
-      `%{mode: :age | :count, value: pos_integer, never_evict: boolean}`. A tool's
-      own `:retention` overrides it.
+    * `tool_retention` — global default tool-result retention
+      (`%{mode: :age | :count, value: pos_integer, never_evict: boolean}`; a tool's
+      own `:retention` overrides it). **Reserved**: the tool-result reducer is not
+      wired into the assembly path, so this is not currently applied.
     * `compaction_window` — how many recent turns the sliding-window reducer keeps
-      verbatim.
+      verbatim. **Reserved**: the sliding-window reducer is not wired into the
+      assembly path, so this is not currently applied.
     * `default_timeout` — suspension expiry default, in milliseconds.
     * `hook_timeout` — per parallel pre-hook deadline, in milliseconds; a hook that
       exceeds it is shut down and recorded as a crashed (skipped) injector. Sequential
       hooks run inline and are the author's responsibility to keep bounded.
     * `audit?` — record `model_calls` for replay/evals (off by default).
-    * `hooks` — `Agentix.Hook` structs run around each model call (Inc 7).
+    * `hooks` — `Agentix.Hook` structs run around each model call.
     * `stream_transformer` — a `(chunk -> chunk)` seam applied to each stream chunk
       (`nil` is the identity default).
     * `persistence` / `notifier` / `pubsub` — wiring resolved at runtime; `nil`
