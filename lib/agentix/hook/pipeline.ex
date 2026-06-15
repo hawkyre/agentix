@@ -27,15 +27,17 @@ defmodule Agentix.Hook.Pipeline do
   @doc """
   Runs the pre-hooks. Returns `{:cont, turn}` (the turn with accumulated injections)
   or `{:halt, reason}`. Raises `Agentix.Hook.OverflowError` if a hook's injection
-  pushes the cumulative size past `injection_reserve`.
+  pushes the cumulative size past `injection_reserve`. `hook_timeout` bounds each
+  parallel pre-hook (ms).
   """
-  @spec run_pre(Turn.t(), [Hook.t()], pos_integer()) :: {:cont, Turn.t()} | {:halt, term()}
-  def run_pre(%Turn{} = turn, hooks, injection_reserve) do
+  @spec run_pre(Turn.t(), [Hook.t()], pos_integer(), pos_integer()) ::
+          {:cont, Turn.t()} | {:halt, term()}
+  def run_pre(%Turn{} = turn, hooks, injection_reserve, hook_timeout) do
     {sequential, parallel} = Enum.split_with(hooks, &(&1.mode == :sequential))
 
     case run_sequential(turn, sequential, injection_reserve) do
       {:halt, reason} -> {:halt, reason}
-      {:cont, turn} -> {:cont, run_parallel(turn, parallel, injection_reserve)}
+      {:cont, turn} -> {:cont, run_parallel(turn, parallel, injection_reserve, hook_timeout)}
     end
   end
 
@@ -43,16 +45,17 @@ defmodule Agentix.Hook.Pipeline do
   Runs the post-hooks sequentially. Returns `{:cont, turn}` or `{:halt, reason}`.
   """
   @spec run_post(Turn.t(), [Hook.t()]) :: {:cont, Turn.t()} | {:halt, term()}
-  def run_post(%Turn{} = turn, hooks), do: run_sequential_post(turn, hooks)
+  def run_post(%Turn{} = turn, hooks), do: run_sequential(turn, hooks, nil)
 
-  # Sequential pre-hooks: fold the turn, short-circuit on :halt, reserve-check after
-  # each (a hook that injects over the reserve is named in the raised OverflowError).
+  # Sequential fold shared by pre and post: short-circuit on `:halt`, fold the turn on
+  # `:cont`. A non-nil `reserve` (pre only) names the offending hook in the
+  # `OverflowError` if its injection pushes the cumulative size over the limit.
   defp run_sequential(turn, [], _reserve), do: {:cont, turn}
 
   defp run_sequential(turn, [hook | rest], reserve) do
     case hook.run.(turn) do
       {:cont, %Turn{} = turn} ->
-        check_reserve!(turn, hook, reserve)
+        if reserve, do: check_reserve!(turn, hook, reserve)
         run_sequential(turn, rest, reserve)
 
       {:halt, reason} ->
@@ -60,39 +63,33 @@ defmodule Agentix.Hook.Pipeline do
 
       other ->
         raise ArgumentError,
-              "sequential pre-hook #{inspect(hook.name)} must return {:cont, %Turn{}} or " <>
-                "{:halt, reason}, got: #{inspect(other)}"
-    end
-  end
-
-  defp run_sequential_post(turn, []), do: {:cont, turn}
-
-  defp run_sequential_post(turn, [hook | rest]) do
-    case hook.run.(turn) do
-      {:cont, %Turn{} = turn} ->
-        run_sequential_post(turn, rest)
-
-      {:halt, reason} ->
-        {:halt, reason}
-
-      other ->
-        raise ArgumentError,
-              "post-hook #{inspect(hook.name)} must return {:cont, %Turn{}} or {:halt, reason}, " <>
+              "hook #{inspect(hook.name)} must return {:cont, %Turn{}} or {:halt, reason}, " <>
                 "got: #{inspect(other)}"
     end
   end
 
-  # Parallel append-only pre-hooks: spawn all (concurrent), then collect in
-  # declaration order. Each runs inside a try/rescue so a crashing injector is logged
-  # and skipped rather than killing the agent; the reserve is checked per contributor.
-  defp run_parallel(turn, [], _reserve), do: turn
+  # Parallel append-only pre-hooks: spawn all (concurrent, unlinked under the
+  # TaskSupervisor), then collect in declaration order. `async_nolink` + `yield`/
+  # `shutdown` (not `await`) contains a hook that *exits* or hangs as a skipped-error
+  # result instead of taking the agent down; the reserve is checked per contributor.
+  defp run_parallel(turn, [], _reserve, _timeout), do: turn
 
-  defp run_parallel(turn, hooks, reserve) do
+  defp run_parallel(turn, hooks, reserve, timeout) do
     hooks
-    |> Enum.map(fn hook -> {hook, Task.async(fn -> safe_run(hook, turn) end)} end)
-    |> Enum.reduce(turn, fn {hook, task}, acc ->
-      collect_parallel(acc, hook, Task.await(task), reserve)
+    |> Enum.map(fn hook ->
+      {hook, Task.Supervisor.async_nolink(Agentix.TaskSupervisor, fn -> safe_run(hook, turn) end)}
     end)
+    |> Enum.reduce(turn, fn {hook, task}, acc ->
+      collect_parallel(acc, hook, await_hook(task, timeout), reserve)
+    end)
+  end
+
+  defp await_hook(task, timeout) do
+    case Task.yield(task, timeout) || Task.shutdown(task) do
+      {:ok, result} -> result
+      {:exit, reason} -> {:error, %RuntimeError{message: "hook exited: #{inspect(reason)}"}}
+      nil -> {:error, %RuntimeError{message: "hook timed out after #{timeout}ms"}}
+    end
   end
 
   defp safe_run(hook, turn) do
@@ -133,9 +130,7 @@ defmodule Agentix.Hook.Pipeline do
 
   # v0 token heuristic: byte/4 over text parts (non-text parts cost 0 here). Converges
   # with Inc 8's Agentix.Tokenizer.
-  defp injection_tokens(parts) do
-    Enum.reduce(parts, 0, fn part, acc -> acc + part_tokens(part) end)
-  end
+  defp injection_tokens(parts), do: parts |> Enum.map(&part_tokens/1) |> Enum.sum()
 
   defp part_tokens(%{text: text}) when is_binary(text), do: div(byte_size(text), 4)
   defp part_tokens(_part), do: 0

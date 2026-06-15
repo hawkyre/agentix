@@ -32,6 +32,7 @@ defmodule Agentix.Events.Publisher do
           | {:tool_call_errored, String.t(), term()}
           | {:suspended, String.t(), atom(), term()}
           | {:turn_completed, term()}
+          | {:turn_halted, term(), term()}
           | {:cancelled, term()}
 
   @doc "The pub/sub topic for a conversation."
@@ -100,6 +101,10 @@ defmodule Agentix.Events.Publisher do
   @doc "Broadcasts that the turn completed normally."
   @spec turn_completed(context(), term()) :: :ok
   def turn_completed(ctx, turn_ref), do: publish(ctx, {:turn_completed, turn_ref})
+
+  @doc "Broadcasts that the turn was halted by a hook (the terminal for a halted turn)."
+  @spec turn_halted(context(), term(), term()) :: :ok
+  def turn_halted(ctx, turn_ref, reason), do: publish(ctx, {:turn_halted, turn_ref, reason})
 
   @doc "Broadcasts that the turn was cancelled."
   @spec cancelled(context(), term()) :: :ok

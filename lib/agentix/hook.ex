@@ -37,6 +37,15 @@ defmodule Agentix.Hook do
   Hooks (and the stream transformer) are functions and are **not** JSON-serializable;
   like tool callbacks they live in the conversation config and are rebuilt from it on
   revival (a no-op for the ETS adapter, which stores terms verbatim).
+
+  ## Trust boundary
+
+  Pre-hook injections are placed adjacent to the user message (`role: :user`), so the
+  model sees them at the **same trust level as the human's own input**. A hook that
+  injects untrusted/retrieved content (RAG, fetched documents) is responsible for its
+  own provenance fencing (e.g. wrapping it in a delimited block) — Agentix does not
+  wrap it, because it cannot know which injections are trusted. Treat injected
+  external content as a prompt-injection surface.
   """
 
   alias Agentix.Turn
@@ -45,15 +54,27 @@ defmodule Agentix.Hook do
   @type phase :: :pre | :post
   @type mode :: :sequential | :parallel
 
-  @type pre_result :: {:cont, Turn.t()} | {:cont, [ContentPart.t()]} | {:halt, term()}
-  @type post_result :: {:cont, Turn.t()} | {:halt, term()}
+  @typedoc """
+  The return of a sequential hook (every `:post` hook, and every `:pre` hook with
+  `mode: :sequential`): transform the turn (`inject/2` to add context) or halt it.
+  """
+  @type sequential_result :: {:cont, Turn.t()} | {:halt, term()}
+
+  @typedoc """
+  The return of a parallel `:pre` hook (`mode: :parallel`): an append-only batch of
+  content parts. Parallel hooks cannot halt.
+  """
+  @type parallel_result :: {:cont, [ContentPart.t()]}
+
+  @typedoc "Any valid hook return; which shape applies depends on phase + mode."
+  @type run_result :: sequential_result() | parallel_result()
 
   @type t :: %__MODULE__{
           name: term(),
           phase: phase(),
           mode: mode(),
           durable?: boolean(),
-          run: (Turn.t() -> pre_result() | post_result())
+          run: (Turn.t() -> run_result())
         }
 
   @enforce_keys [:name, :phase, :run]
@@ -78,13 +99,13 @@ defmodule Agentix.Hook do
   end
 
   @doc "Builds a `:pre` hook. `opts`: `:mode` (`:sequential`/`:parallel`), `:durable?`."
-  @spec pre(term(), (Turn.t() -> pre_result()), keyword()) :: t()
+  @spec pre(term(), (Turn.t() -> run_result()), keyword()) :: t()
   def pre(name, run, opts \\ []) do
     new([name: name, phase: :pre, run: run] ++ opts)
   end
 
   @doc "Builds a `:post` hook. `opts`: `:durable?`."
-  @spec post(term(), (Turn.t() -> post_result()), keyword()) :: t()
+  @spec post(term(), (Turn.t() -> sequential_result()), keyword()) :: t()
   def post(name, run, opts \\ []) do
     new([name: name, phase: :post, run: run] ++ opts)
   end
@@ -92,7 +113,9 @@ defmodule Agentix.Hook do
   @doc """
   Applies the stream-transformer seam to a chunk. The transformer is `(chunk ->
   chunk)`; `nil` is the identity default. The single declared call site for the
-  per-chunk transform (driven from the provider stream).
+  per-chunk transform (driven from the provider stream). A transformer that returns a
+  value the agent's chunk handler doesn't recognize causes that chunk to be dropped —
+  keep it `(chunk -> chunk)`.
   """
   @spec transform_chunk(chunk, (chunk -> chunk) | nil) :: chunk when chunk: term()
   def transform_chunk(chunk, nil), do: chunk

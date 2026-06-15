@@ -9,6 +9,9 @@ defmodule Agentix.Conversation.Config do
     * `injection_reserve` — token budget reserved for pre-hook injections (D7);
       over-reserve injection is a loud `Agentix.Hook.OverflowError`.
     * `default_timeout` — suspension expiry default, in milliseconds.
+    * `hook_timeout` — per parallel pre-hook deadline, in milliseconds; a hook that
+      exceeds it is shut down and recorded as a crashed (skipped) injector. Sequential
+      hooks run inline and are the author's responsibility to keep bounded.
     * `audit?` — record `model_calls` for replay/evals (off by default).
     * `hooks` — `Agentix.Hook` structs run around each model call (Inc 7).
     * `stream_transformer` — a `(chunk -> chunk)` seam applied to each stream chunk
@@ -29,6 +32,7 @@ defmodule Agentix.Conversation.Config do
           working_budget: pos_integer(),
           injection_reserve: pos_integer(),
           default_timeout: pos_integer(),
+          hook_timeout: pos_integer(),
           audit?: boolean(),
           persistence: module() | {module(), keyword()} | nil,
           notifier: module() | nil,
@@ -41,6 +45,8 @@ defmodule Agentix.Conversation.Config do
   @default_injection_reserve 4_000
   # Default suspension expiry, in milliseconds (5 minutes).
   @default_timeout_ms 300_000
+  # Default per parallel pre-hook deadline, in milliseconds.
+  @default_hook_timeout_ms 5_000
 
   @enforce_keys [:model]
   defstruct [
@@ -52,6 +58,7 @@ defmodule Agentix.Conversation.Config do
     working_budget: @default_working_budget,
     injection_reserve: @default_injection_reserve,
     default_timeout: @default_timeout_ms,
+    hook_timeout: @default_hook_timeout_ms,
     audit?: false,
     persistence: nil,
     notifier: nil,
@@ -61,8 +68,9 @@ defmodule Agentix.Conversation.Config do
   @doc """
   Builds a config from `attrs`. Requires a non-empty `:model` string. Raises
   `ArgumentError` if `:model` is missing/blank, if `working_budget`,
-  `injection_reserve`, or `default_timeout` is not a positive integer, if
-  `stream_transformer` is neither `nil` nor a 1-arity function, or on unknown keys.
+  `injection_reserve`, `default_timeout`, or `hook_timeout` is not a positive
+  integer, if `stream_transformer` is neither `nil` nor a 1-arity function, or on
+  unknown keys.
   """
   @spec new(keyword() | map()) :: t()
   def new(attrs) do
@@ -73,6 +81,7 @@ defmodule Agentix.Conversation.Config do
     validate_positive!(:working_budget, config.working_budget)
     validate_positive!(:injection_reserve, config.injection_reserve)
     validate_positive!(:default_timeout, config.default_timeout)
+    validate_positive!(:hook_timeout, config.hook_timeout)
     validate_transformer!(config.stream_transformer)
     config
   end

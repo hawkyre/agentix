@@ -9,10 +9,11 @@ defmodule Agentix.Hook.PipelineTest do
   alias ReqLLM.Message.ContentPart
 
   @reserve 10_000
+  @timeout 1_000
 
   defp turn, do: Turn.new(scope: Scope.system())
 
-  describe "run_pre/3 — sequential" do
+  describe "run_pre/4 — sequential" do
     test "halts at B; A's injection is present at the halt point and C never runs" do
       test = self()
       part_a = ContentPart.text("from A")
@@ -31,7 +32,7 @@ defmodule Agentix.Hook.PipelineTest do
           {:cont, t}
         end)
 
-      assert {:halt, :blocked} = Pipeline.run_pre(turn(), [a, b, c], @reserve)
+      assert {:halt, :blocked} = Pipeline.run_pre(turn(), [a, b, c], @reserve, @timeout)
 
       # B saw A's injected part (A ran and injected before the halt)...
       assert_received {:b_saw, [^part_a]}
@@ -47,19 +48,19 @@ defmodule Agentix.Hook.PipelineTest do
       b = Hook.pre(:b, fn t -> {:cont, Hook.inject(t, part_b)} end)
 
       assert {:cont, %Turn{injections: [^part_a, ^part_b]}} =
-               Pipeline.run_pre(turn(), [a, b], @reserve)
+               Pipeline.run_pre(turn(), [a, b], @reserve, @timeout)
     end
 
     test "a malformed sequential return raises a clear contract error" do
       bad = Hook.pre(:bad, fn _t -> :nope end)
 
-      assert_raise ArgumentError, ~r/sequential pre-hook :bad must return/, fn ->
-        Pipeline.run_pre(turn(), [bad], @reserve)
+      assert_raise ArgumentError, ~r/hook :bad must return/, fn ->
+        Pipeline.run_pre(turn(), [bad], @reserve, @timeout)
       end
     end
   end
 
-  describe "run_pre/3 — parallel batch" do
+  describe "run_pre/4 — parallel batch" do
     test "appends each batch's parts at the tail in declaration order (X before Y)" do
       part_x = ContentPart.text("X")
       part_y = ContentPart.text("Y")
@@ -68,7 +69,7 @@ defmodule Agentix.Hook.PipelineTest do
       y = Hook.pre(:y, fn _t -> {:cont, [part_y]} end, mode: :parallel)
 
       assert {:cont, %Turn{injections: [^part_x, ^part_y]}} =
-               Pipeline.run_pre(turn(), [x, y], @reserve)
+               Pipeline.run_pre(turn(), [x, y], @reserve, @timeout)
     end
 
     test "a crashing parallel injector is skipped, not fatal" do
@@ -77,11 +78,38 @@ defmodule Agentix.Hook.PipelineTest do
       x = Hook.pre(:x, fn _t -> raise "boom" end, mode: :parallel)
       y = Hook.pre(:y, fn _t -> {:cont, [part_y]} end, mode: :parallel)
 
-      assert {:cont, %Turn{injections: [^part_y]}} = Pipeline.run_pre(turn(), [x, y], @reserve)
+      assert {:cont, %Turn{injections: [^part_y]}} =
+               Pipeline.run_pre(turn(), [x, y], @reserve, @timeout)
+    end
+
+    test "a parallel hook that EXITS (uncatchable by rescue) is contained, not fatal" do
+      part_y = ContentPart.text("Y")
+
+      # `exit/1` is not caught by `safe_run`'s `rescue`; async_nolink + yield/shutdown
+      # is what keeps it from propagating to the caller.
+      x = Hook.pre(:x, fn _t -> exit(:boom) end, mode: :parallel)
+      y = Hook.pre(:y, fn _t -> {:cont, [part_y]} end, mode: :parallel)
+
+      assert Process.alive?(self())
+
+      assert {:cont, %Turn{injections: [^part_y]}} =
+               Pipeline.run_pre(turn(), [x, y], @reserve, @timeout)
+
+      assert Process.alive?(self())
+    end
+
+    test "a parallel hook that exceeds the timeout is shut down and skipped" do
+      part_y = ContentPart.text("Y")
+
+      slow = Hook.pre(:slow, fn _t -> Process.sleep(1_000) end, mode: :parallel)
+      y = Hook.pre(:y, fn _t -> {:cont, [part_y]} end, mode: :parallel)
+
+      assert {:cont, %Turn{injections: [^part_y]}} =
+               Pipeline.run_pre(turn(), [slow, y], @reserve, 20)
     end
   end
 
-  describe "run_pre/3 — injection_reserve (D7)" do
+  describe "run_pre/4 — injection_reserve (D7)" do
     test "an over-reserve injection raises OverflowError naming the hook" do
       big =
         Hook.pre(:big, fn t ->
@@ -90,7 +118,7 @@ defmodule Agentix.Hook.PipelineTest do
 
       error =
         assert_raise OverflowError, ~r/:big/, fn ->
-          Pipeline.run_pre(turn(), [big], 5)
+          Pipeline.run_pre(turn(), [big], 5, @timeout)
         end
 
       assert error.hook == :big

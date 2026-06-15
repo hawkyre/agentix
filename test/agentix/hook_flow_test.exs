@@ -59,6 +59,7 @@ defmodule Agentix.HookFlowTest do
       :ok = Conversation.send_message(id, "hi", Scope.new())
 
       assert_receive {:turn_started, _ref}
+      assert_receive {:turn_halted, _ref, :blocked}
       assert_receive {:state_changed, :idle}
       refute_received {:message_completed, _, _}
       refute_received {:turn_completed, _}

@@ -366,11 +366,13 @@ defmodule Agentix.Agent do
     {:next_state, :streaming, data}
   end
 
-  # A pre-hook halted (or crashed/overflowed): no model call happens, so no assistant
-  # message is recorded. The turn ends back at idle. (A dedicated `{:halted, ...}`
-  # live-event member is deferred — see the Inc 9 `:errored` carry-forward.)
+  # A hook halted the turn — pre-hook (no model call happened, no assistant message)
+  # or post-hook (the message already finalized, but the turn stops here). Either way
+  # `{:turn_halted, ...}` is the terminal live event (the counterpart to
+  # `turn_completed`/`cancelled`), so every `turn_started` has exactly one terminal.
   defp halt_turn(data, reason) do
-    Logger.info("agentix turn halted by pre-hook: #{inspect(reason)}")
+    Logger.info("agentix turn halted: #{inspect(reason)}")
+    Publisher.turn_halted(data.publisher, data.turn.ref, reason)
 
     :telemetry.execute(
       [:agentix, :turn, :halt],
@@ -394,8 +396,7 @@ defmodule Agentix.Agent do
     # model calls); otherwise the tool-loop branch decides whether the turn continues.
     case run_post_hooks(data, message) do
       {:halt, reason} ->
-        Logger.info("agentix turn halted by post-hook: #{inspect(reason)}")
-        finish_turn(data)
+        halt_turn(data, reason)
 
       {:cont, _turn} ->
         case message.tool_calls do
@@ -701,6 +702,7 @@ defmodule Agentix.Agent do
         task_pid: nil,
         monitor_ref: nil,
         cancel: nil,
+        context: nil,
         text: "",
         thinking: "",
         calls: %{},
@@ -887,8 +889,13 @@ defmodule Agentix.Agent do
   # Run the pre-pipeline, converting an overflow or a crash into a turn halt (rather
   # than crashing the agent into a restart loop). The OverflowError is still *raised*
   # by the pipeline — the loud signal lives there; the FSM only declines to crash.
+  # The OverflowError is *raised* by the pipeline (the loud signal); the FSM rescues it
+  # into a turn halt rather than crashing into a restart loop. Only the exception
+  # *message* (not the struct) reaches the halt reason → telemetry, to avoid leaking
+  # closure-captured data into metrics handlers.
   defp run_pre_hooks(data, turn) do
-    Pipeline.run_pre(turn, pre_hooks(data.config), data.config.injection_reserve)
+    config = data.config
+    Pipeline.run_pre(turn, pre_hooks(config), config.injection_reserve, config.hook_timeout)
   rescue
     e in OverflowError ->
       Logger.error("agentix pre-hook injection overflow: " <> Exception.message(e))
@@ -896,16 +903,13 @@ defmodule Agentix.Agent do
 
     e ->
       Logger.error("agentix pre-hook crashed: " <> Exception.message(e))
-      {:halt, {:hook_crashed, e}}
+      {:halt, {:hook_crashed, Exception.message(e)}}
   end
 
   # Post-hooks are side-effecting; a crash must not unwind an already-completed turn,
-  # so a crash is logged and treated as `:cont`.
+  # so a crash is logged and treated as `:cont`. `run_post` handles an empty list.
   defp run_post_hooks(data, message) do
-    case post_hooks(data.config) do
-      [] -> {:cont, nil}
-      hooks -> Pipeline.run_post(build_post_turn(data, message), hooks)
-    end
+    Pipeline.run_post(build_post_turn(data, message), post_hooks(data.config))
   rescue
     e ->
       Logger.error("agentix post-hook crashed: " <> Exception.message(e))
