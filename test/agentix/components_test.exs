@@ -40,7 +40,7 @@ defmodule Agentix.ComponentsTest do
       refute html =~ "default-text"
     end
 
-    test "without a slot the default bubble renders the message text" do
+    test "without a slot the default body renders the role label and message text" do
       assigns = %{message: %Message{role: :user, content: [ContentPart.text("hello there")]}}
 
       html =
@@ -49,7 +49,7 @@ defmodule Agentix.ComponentsTest do
         """)
 
       assert html =~ "hello there"
-      assert html =~ "agentix-bubble"
+      assert html =~ "You"
     end
   end
 
