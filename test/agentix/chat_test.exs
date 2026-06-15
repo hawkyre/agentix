@@ -79,6 +79,56 @@ defmodule Agentix.ChatTest do
     end
   end
 
+  describe "snapshot ↔ live convergence" do
+    test "a reconnect renders the same pending entry as the live suspend", ctx do
+      tool =
+        Tool.new(
+          name: "do_thing",
+          executor: :server,
+          approval: :requires_approval,
+          callback: fn _args, _turn -> {:ok, "done"} end
+        )
+
+      start_conversation(ctx.id, tools: [tool])
+
+      MockProvider.script([
+        completion("", tool_calls: [{"do_thing", %{"q" => "x"}}]),
+        completion("ok")
+      ])
+
+      {:ok, view, _html} = mount_chat(ctx.conn, ctx.id)
+      view |> form("#composer", %{"text" => "go"}) |> render_submit()
+      assert_receive {:suspended, tool_call_id, :server, _prompt}
+
+      # The pending entry seen by the original (live) client...
+      live = view |> element("#pending-" <> tool_call_id) |> render()
+      # ...must be byte-identical to the one a reconnecting client builds from the snapshot.
+      {:ok, view2, _html} = mount_chat(build_conn(), ctx.id)
+      snapshot = view2 |> element("#pending-" <> tool_call_id) |> render()
+
+      assert live == snapshot
+    end
+  end
+
+  describe "delta deduplication" do
+    test "a stale delta (seq below what's already applied) is dropped, not re-appended", ctx do
+      start_conversation(ctx.id, [])
+      {:ok, view, _html} = mount_chat(ctx.conn, ctx.id)
+      ref = make_ref()
+
+      send(view.pid, {:thinking_delta, ref, "m1", "AAA", 0})
+      send(view.pid, {:thinking_delta, ref, "m1", "BBB", 1})
+      assert render(view) =~ "AAABBB"
+
+      # A replayed delta (e.g. buffered across a reconnect) carries an already-applied
+      # seq and must be ignored rather than doubling the text.
+      send(view.pid, {:thinking_delta, ref, "m1", "AAA", 0})
+      html = render(view)
+      assert html =~ "AAABBB"
+      refute html =~ "AAABBBAAA"
+    end
+  end
+
   describe "mid-stream reconnect" do
     test "a second mount seeds the JS hook with the partial assistant text", ctx do
       Application.put_env(:agentix, :pausing_provider, %{text: "partial-text", test_pid: self()})

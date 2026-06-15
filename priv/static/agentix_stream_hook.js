@@ -19,17 +19,28 @@
 //   const liveSocket = new LiveSocket("/live", Socket, { hooks: { AgentixStream } })
 //
 // The server pushes two events:
-//   * "agentix:seed"  — %{id, text}  : the partial text on a mid-stream (re)connect
-//   * "agentix:delta" — %{id, chunk} : each streamed token
-// Both are filtered by id so only the matching streaming element reacts.
+//   * "agentix:seed"  — %{id, text, seq} : the partial text + delta count on a
+//                       mid-stream (re)connect
+//   * "agentix:delta" — %{id, chunk, seq}: each streamed token, tagged with its
+//                       monotonic per-message sequence number
+// Both are filtered by id so only the matching streaming element reacts. `seq` lets
+// the hook drop a delta already covered by the seed (or any earlier replay), so a
+// reconnect during an active stream never double-renders leading tokens.
 export const AgentixStream = {
   mounted() {
-    this.handleEvent("agentix:seed", ({ id, text }) => {
-      if (id === this.msgId()) this.el.textContent = text || ""
+    // Next delta seq we will accept; deltas below it are duplicates already rendered.
+    this.seq = 0
+
+    this.handleEvent("agentix:seed", ({ id, text, seq }) => {
+      if (id !== this.msgId()) return
+      this.el.textContent = text || ""
+      this.seq = seq || 0
     })
 
-    this.handleEvent("agentix:delta", ({ id, chunk }) => {
-      if (id === this.msgId()) this.el.textContent += chunk
+    this.handleEvent("agentix:delta", ({ id, chunk, seq }) => {
+      if (id !== this.msgId() || seq < this.seq) return
+      this.el.textContent += chunk
+      this.seq = seq + 1
     })
   },
 

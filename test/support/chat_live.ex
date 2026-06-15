@@ -38,7 +38,11 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       >
       </div>
 
-      <div :for={{id, _entry} <- @pending} id={"pending-" <> id} class="pending">
+      <div :if={@streaming_message} class="thinking">{@streaming_message.thinking}</div>
+
+      <div :for={{id, entry} <- @pending} id={"pending-" <> id} class="pending">
+        <span class="kind">{to_string(entry.kind)}</span>
+        <span class="prompt">{inspect(entry.prompt)}</span>
         <button phx-click="approve" phx-value-id={id}>approve</button>
       </div>
       """

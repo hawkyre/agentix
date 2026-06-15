@@ -82,7 +82,7 @@ defmodule Agentix.ConversationTest do
       assert_receive {:turn_started, ref}
       assert_receive {:state_changed, :preparing}
       assert_receive {:state_changed, :streaming}
-      assert_receive {:text_delta, ^ref, msg_id, "Hello there"}
+      assert_receive {:text_delta, ^ref, msg_id, "Hello there", _seq}
       assert_receive {:message_completed, ^ref, %Message{role: :assistant} = message}
       assert_receive {:turn_completed, ^ref}
       assert_receive {:state_changed, :idle}
@@ -112,8 +112,8 @@ defmodule Agentix.ConversationTest do
       {:ok, _pid} = Conversation.ensure_started(id, config: config())
 
       :ok = Conversation.send_message(id, "Hi", Scope.new())
-      assert_receive {:thinking_delta, _ref, _msg_id, "let me think"}
-      assert_receive {:text_delta, _ref, _msg_id, "answer"}
+      assert_receive {:thinking_delta, _ref, _msg_id, "let me think", _seq}
+      assert_receive {:text_delta, _ref, _msg_id, "answer", _seq}
       assert_receive {:turn_completed, _ref}
     end
   end
@@ -132,7 +132,7 @@ defmodule Agentix.ConversationTest do
       :ok = Conversation.send_message(id, "Hi", Scope.new())
 
       # wait until the partial text has streamed (agent is now parked in streaming)
-      assert_receive {:text_delta, _ref, _msg_id, "partial"}
+      assert_receive {:text_delta, _ref, _msg_id, "partial", _seq}
 
       assert :ok = Conversation.cancel(id)
 
@@ -146,7 +146,7 @@ defmodule Agentix.ConversationTest do
     test "a second send while streaming returns {:error, :busy}", %{id: id} do
       {:ok, _pid} = Conversation.ensure_started(id, config: config())
       :ok = Conversation.send_message(id, "Hi", Scope.new())
-      assert_receive {:text_delta, _ref, _msg_id, "partial"}
+      assert_receive {:text_delta, _ref, _msg_id, "partial", _seq}
 
       assert {:error, :busy} = Conversation.send_message(id, "again", Scope.new())
 

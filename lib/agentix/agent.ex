@@ -81,7 +81,9 @@ defmodule Agentix.Agent do
   @type snapshot :: %{
           state: atom(),
           messages: [Message.t()],
-          streaming_message: %{id: String.t(), text: String.t(), thinking: String.t()} | nil,
+          streaming_message:
+            %{id: String.t(), text: String.t(), thinking: String.t(), seq: non_neg_integer()}
+            | nil,
           in_flight_tools: %{optional(String.t()) => map()},
           pending: %{optional(String.t()) => map()}
         }
@@ -111,9 +113,16 @@ defmodule Agentix.Agent do
   defp live_turn(conversation_id) do
     case Registry.lookup(Agentix.Registry, conversation_id) do
       [{_pid, _}] -> :gen_statem.call(via(conversation_id), :snapshot)
-      [] -> %{state: :idle, streaming_message: nil, in_flight_tools: %{}, pending: %{}}
+      [] -> idle_turn()
     end
+  catch
+    # The agent may exit between the lookup and the call (crash, revival churn, a
+    # mid-stream kill). Treat that as 'no live turn' and fall back to the durable log
+    # rather than crashing the caller (e.g. a mounting LiveView).
+    :exit, _reason -> idle_turn()
   end
+
+  defp idle_turn, do: %{state: :idle, streaming_message: nil, in_flight_tools: %{}, pending: %{}}
 
   @doc false
   def child_spec(opts) do
@@ -368,6 +377,9 @@ defmodule Agentix.Agent do
       context: nil,
       text: "",
       thinking: "",
+      # Monotonic per-message delta counter; lets a reconnect snapshot dedupe replayed
+      # text/thinking deltas (reset whenever a new assistant message begins).
+      delta_seq: 0,
       # tool_call_id => %{tool, name, args, phase, task, result, timer}
       calls: %{},
       # monitor_ref => tool_call_id, for O(1) crashed-task lookup on :DOWN
@@ -522,7 +534,9 @@ defmodule Agentix.Agent do
   end
 
   # Persist whatever assistant text streamed so far as a (partial) assistant_msg, so
-  # every turn leaves a paired record. `suffix` marks why it is partial.
+  # every turn leaves a paired record. `suffix` marks why it is partial. The partial is
+  # broadcast as a completed message (same as a normal finish) so a connected client
+  # keeps the streamed text instead of having it vanish when the turn resets.
   defp record_partial(data, suffix) do
     turn = data.turn
     text = turn.text <> suffix
@@ -534,6 +548,7 @@ defmodule Agentix.Agent do
       )
 
     {:ok, seq} = append_event(data, :assistant_msg, message_content(message))
+    Publisher.message_completed(data.publisher, turn.ref, message)
     %{data | last_seq: seq}
   end
 
@@ -764,6 +779,7 @@ defmodule Agentix.Agent do
         context: nil,
         text: "",
         thinking: "",
+        delta_seq: 0,
         calls: %{},
         task_index: %{}
     }
@@ -853,7 +869,7 @@ defmodule Agentix.Agent do
   end
 
   defp streaming_view(state, %{} = turn) when state in [:preparing, :streaming],
-    do: %{id: turn.msg_id, text: turn.text, thinking: turn.thinking}
+    do: %{id: turn.msg_id, text: turn.text, thinking: turn.thinking, seq: turn.delta_seq}
 
   defp streaming_view(_state, _turn), do: nil
 
@@ -959,14 +975,14 @@ defmodule Agentix.Agent do
 
   defp handle_chunk(%{type: :content, text: text}, data) when is_binary(text) do
     turn = data.turn
-    Publisher.text_delta(data.publisher, turn.ref, turn.msg_id, text)
-    put_in(data.turn.text, turn.text <> text)
+    Publisher.text_delta(data.publisher, turn.ref, turn.msg_id, text, turn.delta_seq)
+    %{data | turn: %{turn | text: turn.text <> text, delta_seq: turn.delta_seq + 1}}
   end
 
   defp handle_chunk(%{type: :thinking, text: text}, data) when is_binary(text) do
     turn = data.turn
-    Publisher.thinking_delta(data.publisher, turn.ref, turn.msg_id, text)
-    put_in(data.turn.thinking, turn.thinking <> text)
+    Publisher.thinking_delta(data.publisher, turn.ref, turn.msg_id, text, turn.delta_seq)
+    %{data | turn: %{turn | thinking: turn.thinking <> text, delta_seq: turn.delta_seq + 1}}
   end
 
   # :tool_call chunks carry no id (harvested post-stream from the assistant message);

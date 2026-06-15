@@ -28,7 +28,7 @@ defmodule Agentix.Provider.ReqLLMTest do
     :ok = Conversation.send_message(id, "Say hello.", Scope.new())
 
     assert_receive {:state_changed, :streaming}, 30_000
-    assert_receive {:text_delta, _ref, _msg_id, delta}, 30_000
+    assert_receive {:text_delta, _ref, _msg_id, delta, _seq}, 30_000
     assert is_binary(delta)
     assert_receive {:message_completed, _ref, %ReqLLM.Message{}}, 30_000
     assert_receive {:turn_completed, _ref}, 30_000
@@ -41,7 +41,7 @@ defmodule Agentix.Provider.ReqLLMTest do
     :ok = Conversation.send_message(id, "Tell me a very long story.", Scope.new())
 
     # As soon as the first delta lands the socket is open; cancel must close it.
-    assert_receive {:text_delta, _ref, _msg_id, _delta}, 30_000
+    assert_receive {:text_delta, _ref, _msg_id, _delta, _seq}, 30_000
     assert :ok = Conversation.cancel(id)
     assert_receive {:cancelled, _ref}, 30_000
     assert_receive {:state_changed, :idle}, 30_000

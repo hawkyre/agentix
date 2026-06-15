@@ -23,8 +23,8 @@ defmodule Agentix.Events.Publisher do
   @type live_event ::
           {:state_changed, atom()}
           | {:turn_started, reference() | term()}
-          | {:text_delta, term(), String.t(), String.t()}
-          | {:thinking_delta, term(), String.t(), String.t()}
+          | {:text_delta, term(), String.t(), String.t(), non_neg_integer()}
+          | {:thinking_delta, term(), String.t(), String.t(), non_neg_integer()}
           | {:message_completed, term(), ReqLLM.Message.t()}
           | {:tool_call_started, String.t(), String.t(), atom(), map()}
           | {:tool_progress, String.t(), term()}
@@ -47,10 +47,24 @@ defmodule Agentix.Events.Publisher do
   def new(%Config{} = config, conversation_id) do
     %{
       notifier: config.notifier || Notifier.impl(),
-      pubsub: config.pubsub || Application.get_env(:agentix, :pubsub, Agentix.PubSub),
+      pubsub: resolve_pubsub(config),
       topic: topic(conversation_id)
     }
   end
+
+  @doc """
+  Resolves the pub/sub server for a conversation: an explicit `:pubsub` (from a `Config`
+  or a persisted settings map) wins, else application config, else `Agentix.PubSub`. The
+  single source of this precedence so subscribers (the LiveView layer) and the publishing
+  agent never disagree on the bus.
+  """
+  @spec resolve_pubsub(Config.t() | map()) :: Notifier.pubsub()
+  def resolve_pubsub(%Config{pubsub: pubsub}), do: pubsub || default_pubsub()
+
+  def resolve_pubsub(settings) when is_map(settings),
+    do: settings[:pubsub] || settings["pubsub"] || default_pubsub()
+
+  defp default_pubsub, do: Application.get_env(:agentix, :pubsub, Agentix.PubSub)
 
   @doc "Broadcasts a member of the live-event union on the conversation topic."
   @spec publish(context(), live_event()) :: :ok
@@ -66,15 +80,19 @@ defmodule Agentix.Events.Publisher do
   @spec turn_started(context(), term()) :: :ok
   def turn_started(ctx, turn_ref), do: publish(ctx, {:turn_started, turn_ref})
 
-  @doc "Broadcasts an assistant text delta (→ the JS hook in the LiveView layer)."
-  @spec text_delta(context(), term(), String.t(), String.t()) :: :ok
-  def text_delta(ctx, turn_ref, msg_id, chunk),
-    do: publish(ctx, {:text_delta, turn_ref, msg_id, chunk})
+  @doc """
+  Broadcasts an assistant text delta (→ the JS hook in the LiveView layer). `seq` is a
+  per-message, monotonically increasing delta counter so a late/replayed delta can be
+  deduplicated against a reconnect snapshot.
+  """
+  @spec text_delta(context(), term(), String.t(), String.t(), non_neg_integer()) :: :ok
+  def text_delta(ctx, turn_ref, msg_id, chunk, seq),
+    do: publish(ctx, {:text_delta, turn_ref, msg_id, chunk, seq})
 
-  @doc "Broadcasts a thinking/reasoning delta."
-  @spec thinking_delta(context(), term(), String.t(), String.t()) :: :ok
-  def thinking_delta(ctx, turn_ref, msg_id, chunk),
-    do: publish(ctx, {:thinking_delta, turn_ref, msg_id, chunk})
+  @doc "Broadcasts a thinking/reasoning delta. `seq` follows the `text_delta/5` contract."
+  @spec thinking_delta(context(), term(), String.t(), String.t(), non_neg_integer()) :: :ok
+  def thinking_delta(ctx, turn_ref, msg_id, chunk, seq),
+    do: publish(ctx, {:thinking_delta, turn_ref, msg_id, chunk, seq})
 
   @doc "Broadcasts the finalized assistant message (→ stream_insert)."
   @spec message_completed(context(), term(), ReqLLM.Message.t()) :: :ok

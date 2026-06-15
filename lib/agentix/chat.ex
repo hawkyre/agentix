@@ -28,6 +28,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     available; headless/API consumers omit the dependency and never load it.
     """
 
+    import Phoenix.Component, only: [assign: 3]
     import Phoenix.LiveView, only: [attach_hook: 4]
 
     alias Agentix.Chat.Projection
@@ -81,8 +82,12 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
 
     @doc """
     Sends a user message through the conversation and optimistically streams it into
-    `:messages`. Pass `:scope` (an `Agentix.Scope`) in `opts` to attribute the message;
-    a `{:error, :busy}` from an in-flight turn leaves the socket unchanged.
+    `:messages`. Pass `:scope` (an `Agentix.Scope`) in `opts` to attribute the message.
+
+    On success the `:agentix_error` assign is cleared; on failure (e.g. `:busy` for an
+    in-flight turn, or `:unknown_conversation` for one that was never started) the
+    message is **not** inserted and `:agentix_error` is set to the reason so the host can
+    surface it — the input is never dropped silently.
     """
     @spec send_message(Socket.t(), Conversation.message(), keyword()) ::
             Socket.t()
@@ -90,8 +95,13 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       scope = Keyword.get(opts, :scope, Scope.new())
 
       case Conversation.send_message(conversation_id(socket), message, scope) do
-        :ok -> Projection.insert_user_message(socket, user_message(message))
-        {:error, _reason} -> socket
+        :ok ->
+          socket
+          |> assign(:agentix_error, nil)
+          |> Projection.insert_user_message(user_message(message))
+
+        {:error, reason} ->
+          assign(socket, :agentix_error, reason)
       end
     end
 
