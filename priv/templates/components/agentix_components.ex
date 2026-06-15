@@ -13,8 +13,9 @@
     `darkMode: 'class'`) in a flat, borderless style — full-width turn rows on hairline
     dividers. Two small extras the host opts into:
 
-      * **grouping** — give the thread the `agentix-thread` class to collapse consecutive
-        same-role rows (the CSS lives in `AgentixComponents.css/0`);
+      * **grouping** — give the thread the `agentix-thread` class to collapse each turn
+        (a user message, or an assistant message with its tool calls) into one block with
+        a single header (the CSS lives in `AgentixComponents.css/0`);
       * **JS hooks** — `AgentixStream` (streaming text) and `AgentixComposer`
         (auto-grow + Enter-to-send), shipped at `priv/static/agentix_stream_hook.js`.
 
@@ -43,11 +44,7 @@
 
     def message_list(assigns) do
       ~H"""
-      <div
-        id={@id}
-        class="agentix-thread divide-y divide-neutral-200/70 dark:divide-neutral-800/70"
-        phx-update="stream"
-      >
+      <div id={@id} class="agentix-thread" phx-update="stream">
         <.message :for={{dom_id, message} <- @messages} id={dom_id} message={message} />
       </div>
 
@@ -100,19 +97,41 @@
 
     @doc """
     Renders one finalized message as a flat row. A `:bubble` slot replaces the default
-    body. The `data-role` attribute drives consecutive-row grouping (see `css/0`).
+    body. The `data-group` attribute (`"user"` for user messages, `"agent"` for assistant
+    *and* tool messages) drives turn grouping: every assistant + tool row of one turn
+    collapses under a single header (see `css/0`). Tool messages render as a headerless
+    card, never their own "Tool" header — they are part of the assistant's turn.
     """
     attr(:id, :string, default: nil)
     attr(:message, :map, required: true)
     slot(:bubble)
 
+    def message(%{message: %{role: :tool}} = assigns) do
+      ~H"""
+      <div id={@id} class="agentix-row group flex gap-3.5 py-5" data-group="agent" data-role="tool">
+        <div class="agentix-avatar mt-0.5 h-7 w-7 shrink-0" aria-hidden="true"></div>
+        <div class="min-w-0 flex-1">
+          <.tool id={@message.tool_call_id} name={tool_name(@message)} status={tool_status(@message)} />
+        </div>
+      </div>
+      """
+    end
+
     def message(assigns) do
       ~H"""
-      <div id={@id} class="agentix-row group flex gap-3.5 py-5" data-role={@message.role}>
+      <div
+        id={@id}
+        class="agentix-row group flex gap-3.5 py-5"
+        data-group={group(@message.role)}
+        data-role={@message.role}
+      >
         <.avatar role={@message.role} />
         <div class="min-w-0 flex-1">
           <.role_header role={@message.role} />
-          <div :if={@bubble == []} class="text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200">
+          <div
+            :if={@bubble == [] and message_text(@message) != ""}
+            class="text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200"
+          >
             {message_text(@message)}
           </div>
           {render_slot(@bubble, @message)}
@@ -274,24 +293,36 @@
       """
     end
 
-    @doc "The CSS for consecutive-row grouping and the reasoning chevron. Inline once."
+    @doc "The CSS for turn grouping and the reasoning chevron. Inline once."
     @spec css() :: String.t()
     def css do
       """
-      /* Group consecutive same-role rows: drop the divider, hide the repeated avatar
-         and header, and pull the row up so it reads as one block. */
-      .agentix-thread > [data-role="assistant"] + [data-role="assistant"],
-      .agentix-thread > [data-role="user"] + [data-role="user"] {
-        border-top-color: transparent !important;
+      /* A turn is a run of rows sharing a `data-group` ("user", or "agent" = assistant +
+         its tool calls). A hairline divider is drawn only where the group changes — i.e.
+         between turns — so the whole of one assistant turn (text, tools, more text) reads
+         as a single block with no internal lines. */
+      .agentix-thread > [data-group="user"] + [data-group="agent"],
+      .agentix-thread > [data-group="agent"] + [data-group="user"] {
+        border-top: 1px solid rgb(229 229 229 / 0.7);
+      }
+      .dark .agentix-thread > [data-group="user"] + [data-group="agent"],
+      .dark .agentix-thread > [data-group="agent"] + [data-group="user"] {
+        border-top-color: rgb(38 38 38 / 0.7);
+      }
+
+      /* Continuation rows within a turn: pull up to merge with the row above and hide the
+         repeated avatar + header, so a turn shows exactly one header. */
+      .agentix-thread > [data-group="agent"] + [data-group="agent"],
+      .agentix-thread > [data-group="user"] + [data-group="user"] {
         padding-top: 0.25rem;
         margin-top: -0.75rem;
       }
-      .agentix-thread > [data-role="assistant"] + [data-role="assistant"] > .agentix-avatar,
-      .agentix-thread > [data-role="user"] + [data-role="user"] > .agentix-avatar {
+      .agentix-thread > [data-group="agent"] + [data-group="agent"] > .agentix-avatar,
+      .agentix-thread > [data-group="user"] + [data-group="user"] > .agentix-avatar {
         visibility: hidden;
       }
-      .agentix-thread > [data-role="assistant"] + [data-role="assistant"] .agentix-role-header,
-      .agentix-thread > [data-role="user"] + [data-role="user"] .agentix-role-header {
+      .agentix-thread > [data-group="agent"] + [data-group="agent"] .agentix-role-header,
+      .agentix-thread > [data-group="user"] + [data-group="user"] .agentix-role-header {
         display: none;
       }
       details[open] .agentix-chev { transform: rotate(90deg); }
@@ -430,6 +461,17 @@
       do: parts |> Enum.map(&Map.get(&1, :text)) |> Enum.reject(&is_nil/1) |> Enum.join("")
 
     defp message_text(_message), do: ""
+
+    # Turn grouping: user messages are their own group; assistant and tool messages share
+    # the "agent" group so a turn's text + tool rows collapse under one header.
+    defp group(:user), do: "user"
+    defp group(_role), do: "agent"
+
+    defp tool_name(%{metadata: %{"tool_name" => name}}) when is_binary(name), do: name
+    defp tool_name(_message), do: "tool"
+
+    defp tool_status(%{metadata: %{"tool_status" => "error"}}), do: :error
+    defp tool_status(_message), do: :ok
 
     defp prompt_label(%{kind: :approval}), do: "Approval required to continue."
     defp prompt_label(%{kind: :elicitation}), do: "The assistant needs more information."

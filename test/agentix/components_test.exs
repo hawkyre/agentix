@@ -7,6 +7,8 @@ defmodule Agentix.ComponentsTest do
   alias ReqLLM.Message
   alias ReqLLM.Message.ContentPart
 
+  defp count(haystack, needle), do: haystack |> String.split(needle) |> length() |> Kernel.-(1)
+
   describe "message_list/1 — pending controls switch on kind" do
     test "an :approval renders approve/deny controls and an :elicitation renders a form" do
       pending = %{
@@ -22,6 +24,41 @@ defmodule Agentix.ComponentsTest do
       assert html =~ ~s(phx-click="deny")
       assert html =~ "<form"
       assert html =~ ~s(phx-submit="resolve")
+    end
+  end
+
+  describe "message_list/1 — one header per assistant turn" do
+    test "a user→assistant→tool→assistant turn renders a single Assistant header and no Tool header" do
+      messages = [
+        {"m1", %Message{role: :user, content: [ContentPart.text("use a tool")]}},
+        {"m2", %Message{role: :assistant, content: [ContentPart.text("Let me look that up.")]}},
+        {"m3",
+         %Message{
+           role: :tool,
+           tool_call_id: "t1",
+           content: [ContentPart.text(~s({"ok":true}))],
+           metadata: %{"tool_name" => "lookup", "tool_status" => "ok"}
+         }},
+        {"m4", %Message{role: :assistant, content: [ContentPart.text("Done — 42.")]}}
+      ]
+
+      html = render_component(&Agentix.Components.message_list/1, id: "msgs", messages: messages)
+
+      # The three agent rows (assistant text, tool, assistant text) share one group; the
+      # user message is its own group. Grouping is what collapses them under one header.
+      assert count(html, ~s(data-group="agent")) == 3
+      assert count(html, ~s(data-group="user")) == 1
+
+      # The tool row never renders its own "Tool" header — it's a named, headerless card.
+      assert html =~ "lookup"
+      refute html =~ ">Tool<"
+
+      # Only the assistant rows carry a role-header element; the CSS hides every one that
+      # follows another agent row, so exactly one header is visible per turn.
+      assert count(html, "agentix-role-header") == 3
+
+      assert Agentix.Components.css() =~
+               ~s([data-group="agent"] + [data-group="agent"] .agentix-role-header)
     end
   end
 

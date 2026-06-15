@@ -1169,8 +1169,20 @@ defmodule Agentix.Agent do
 
   defp event_to_messages(%Event{type: :tool_result, content: content}) do
     id = content["tool_call_id"] || content[:tool_call_id]
+    name = content["name"] || content[:name]
     result = content["result"] || content[:result]
-    [%Message{role: :tool, tool_call_id: id, content: [ContentPart.text(encode_result(result))]}]
+
+    # The name/status ride in metadata (namespaced to avoid the `"status"` key used by
+    # `mark_truncated`) so the UI can render a named tool card; the model still sees only
+    # the result text part.
+    [
+      %Message{
+        role: :tool,
+        tool_call_id: id,
+        content: [ContentPart.text(encode_result(result))],
+        metadata: %{"tool_name" => name, "tool_status" => to_string(tool_result_status(result))}
+      }
+    ]
   end
 
   defp event_to_messages(_event), do: []
@@ -1190,6 +1202,13 @@ defmodule Agentix.Agent do
 
   defp encode_result(result) when is_binary(result), do: result
   defp encode_result(result), do: Jason.encode!(result)
+
+  # UI status for a finalized tool result. Mirrors `result_status/1` but collapses to the
+  # `:ok | :error` the `tool/1` component expects, and tolerates string keys (the Ecto
+  # adapter JSON-encodes results; the ETS adapter keeps atoms).
+  defp tool_result_status(%{ok: true}), do: :ok
+  defp tool_result_status(%{"ok" => true}), do: :ok
+  defp tool_result_status(_result), do: :error
 
   # Provider opts: hand the tool schemas through (the loop dispatches them itself).
   defp stream_opts(%Config{tools: []}), do: []

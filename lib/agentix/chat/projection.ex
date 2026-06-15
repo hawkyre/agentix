@@ -11,9 +11,9 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         deltas pushed to the JS hook (tagged with `kind`) so a growing string is never
         re-diffed server-side; only the finalized message lands in `:messages`;
       * `:state` — the agent's current turn state, and `:streaming?` derived from it;
-      * `:in_flight_tools` — `%{tool_call_id => %{name, executor, status}}` where `status`
-        is `:running` | `:ok` | `:error`; a resolved tool keeps its outcome for the rest of
-        the turn (a suspended tool moves to `:pending`);
+      * `:in_flight_tools` — `%{tool_call_id => %{name, executor, status}}` for calls still
+        running (`status: :running`); a suspended call moves to `:pending`, and a resolved
+        call moves into `:messages` as a finalized tool row (so live and reload converge);
       * `:pending` — `%{tool_call_id => %{executor, kind, prompt}}` awaiting resolution.
 
     `attach/3` subscribes **before** reading the snapshot, so no event is lost in the
@@ -35,6 +35,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     alias Agentix.Persistence
     alias Phoenix.LiveView.Socket
     alias ReqLLM.Message
+    alias ReqLLM.Message.ContentPart
 
     @conversation_assign :agentix_conversation_id
     @default_page_size 50
@@ -165,8 +166,11 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       end)
     end
 
-    def apply_event(socket, {:tool_call_resolved, id, _result}), do: resolve_tool(socket, id, :ok)
-    def apply_event(socket, {:tool_call_errored, id, _reason}), do: resolve_tool(socket, id, :error)
+    def apply_event(socket, {:tool_call_resolved, id, result}),
+      do: finalize_tool(socket, id, :ok, result)
+
+    def apply_event(socket, {:tool_call_errored, id, reason}),
+      do: finalize_tool(socket, id, :error, reason)
 
     def apply_event(socket, {:suspended, id, executor, prompt}) do
       entry = %{
@@ -191,6 +195,11 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
 
     @doc "The DOM id for a message in the `:messages` stream."
     @spec dom_id(Message.t()) :: String.t()
+    # Tool rows key off the tool-call id so the same row inserted live (on resolve) and
+    # seeded from history (on reconnect/reload) collapse to one stream node.
+    def dom_id(%Message{role: :tool, tool_call_id: id}) when is_binary(id),
+      do: "agentix-msg-tool-" <> id
+
     def dom_id(%Message{metadata: %{"id" => id}}) when is_binary(id), do: "agentix-msg-" <> id
 
     def dom_id(%Message{}),
@@ -229,18 +238,30 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       end
     end
 
-    # A resolved/errored call stays visible with its outcome (`:ok` / `:error`) for the
-    # rest of the turn instead of vanishing; it leaves the pending set either way.
-    defp resolve_tool(socket, id, status) do
+    # A resolved/errored call becomes a finalized tool row in the `:messages` stream — a
+    # permanent timeline item under the assistant turn, exactly like a completed message —
+    # and leaves the live in-flight + pending sets. This makes the live turn converge with
+    # what a reconnect/reload renders from history (`Agent.history/2`).
+    defp finalize_tool(socket, id, status, result) do
+      name = get_in(socket.assigns.in_flight_tools, [id, :name])
+
       socket
-      |> update(:in_flight_tools, fn tools ->
-        case tools do
-          %{^id => entry} -> Map.put(tools, id, %{entry | status: status})
-          _ -> tools
-        end
-      end)
+      |> stream_insert(:messages, tool_message(id, name, status, result))
+      |> update(:in_flight_tools, &Map.delete(&1, id))
       |> update(:pending, &Map.delete(&1, id))
     end
+
+    defp tool_message(id, name, status, result) do
+      %Message{
+        role: :tool,
+        tool_call_id: id,
+        content: [ContentPart.text(encode_result(result))],
+        metadata: %{"tool_name" => name, "tool_status" => to_string(status)}
+      }
+    end
+
+    defp encode_result(result) when is_binary(result), do: result
+    defp encode_result(result), do: inspect(result)
 
     defp reset_turn(socket) do
       socket
