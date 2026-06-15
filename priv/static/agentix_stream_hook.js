@@ -41,6 +41,7 @@ export const AgentixStream = {
       const node = this.node(kind)
       if (!node) return
       node.textContent = text || ""
+      if (text) node.hidden = false
       this.seq[kind] = seq || 0
     })
 
@@ -48,6 +49,7 @@ export const AgentixStream = {
       if (id !== this.msgId() || seq < this.seq[kind]) return
       const node = this.node(kind)
       if (!node) return
+      node.hidden = false
       node.textContent += chunk
       this.seq[kind] = seq + 1
     })

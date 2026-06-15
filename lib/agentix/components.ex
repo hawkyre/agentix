@@ -51,10 +51,10 @@ if Code.ensure_loaded?(Phoenix.Component) do
         <.avatar role={:assistant} />
         <div class="min-w-0 flex-1">
           <.role_header role={:assistant} />
-          <div class="space-y-3">
+          <div :if={@in_flight_tools != %{}} class="mb-3 space-y-2">
             <.tool :for={{id, tool} <- @in_flight_tools} id={id} tool={tool} />
-            <.streaming_message :if={@streaming_message} message={@streaming_message} />
           </div>
+          <.streaming_message :if={@streaming_message} message={@streaming_message} />
         </div>
       </div>
 
@@ -105,11 +105,10 @@ if Code.ensure_loaded?(Phoenix.Component) do
       ~H"""
       <div
         id={"agentix-stream-#{@message.id}"}
-        class="space-y-3"
         phx-hook="AgentixStream"
         phx-update="ignore"
         data-msg-id={@message.id}
-      ><div data-agentix="thinking" class="whitespace-pre-wrap text-[13px] leading-relaxed text-neutral-500 empty:hidden dark:text-neutral-400"></div><div data-agentix="text" class="caret whitespace-pre-wrap text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200"></div></div>
+      ><div data-agentix="thinking" hidden class="mb-3 whitespace-pre-wrap text-[13px] leading-relaxed text-neutral-500 dark:text-neutral-400"></div><div data-agentix="text" class="caret whitespace-pre-wrap text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200"></div></div>
       """
     end
 
