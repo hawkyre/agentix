@@ -8,6 +8,11 @@ defmodule Agentix.Conversation.Config do
     * `working_budget` — token budget for the assembled context.
     * `injection_reserve` — token budget reserved for pre-hook injections (D7);
       over-reserve injection is a loud `Agentix.Hook.OverflowError`.
+    * `tool_retention` — global default tool-result retention (compaction, Inc 8):
+      `%{mode: :age | :count, value: pos_integer, never_evict: boolean}`. A tool's
+      own `:retention` overrides it.
+    * `compaction_window` — how many recent turns the sliding-window reducer keeps
+      verbatim.
     * `default_timeout` — suspension expiry default, in milliseconds.
     * `hook_timeout` — per parallel pre-hook deadline, in milliseconds; a hook that
       exceeds it is shut down and recorded as a crashed (skipped) injector. Sequential
@@ -31,6 +36,8 @@ defmodule Agentix.Conversation.Config do
           stream_transformer: (term() -> term()) | nil,
           working_budget: pos_integer(),
           injection_reserve: pos_integer(),
+          tool_retention: %{mode: :age | :count, value: pos_integer(), never_evict: boolean()},
+          compaction_window: pos_integer(),
           default_timeout: pos_integer(),
           hook_timeout: pos_integer(),
           audit?: boolean(),
@@ -43,6 +50,10 @@ defmodule Agentix.Conversation.Config do
   @default_working_budget 30_000
   # Default reserve for pre-hook injections (~tokens), carved out of the budget.
   @default_injection_reserve 4_000
+  # Default tool-result retention: keep full results for the last 6 turns.
+  @default_tool_retention %{mode: :age, value: 6, never_evict: false}
+  # Default recent-turn window the sliding-window reducer keeps verbatim.
+  @default_compaction_window 40
   # Default suspension expiry, in milliseconds (5 minutes).
   @default_timeout_ms 300_000
   # Default per parallel pre-hook deadline, in milliseconds.
@@ -57,6 +68,8 @@ defmodule Agentix.Conversation.Config do
     stream_transformer: nil,
     working_budget: @default_working_budget,
     injection_reserve: @default_injection_reserve,
+    tool_retention: @default_tool_retention,
+    compaction_window: @default_compaction_window,
     default_timeout: @default_timeout_ms,
     hook_timeout: @default_hook_timeout_ms,
     audit?: false,
@@ -80,8 +93,10 @@ defmodule Agentix.Conversation.Config do
     config = struct!(__MODULE__, attrs)
     validate_positive!(:working_budget, config.working_budget)
     validate_positive!(:injection_reserve, config.injection_reserve)
+    validate_positive!(:compaction_window, config.compaction_window)
     validate_positive!(:default_timeout, config.default_timeout)
     validate_positive!(:hook_timeout, config.hook_timeout)
+    validate_retention!(config.tool_retention)
     validate_transformer!(config.stream_transformer)
     config
   end
@@ -97,6 +112,15 @@ defmodule Agentix.Conversation.Config do
 
   defp validate_positive!(field, value) do
     raise ArgumentError, "#{field} must be a positive integer, got: #{inspect(value)}"
+  end
+
+  defp validate_retention!(%{mode: mode, value: value})
+       when mode in [:age, :count] and is_integer(value) and value > 0, do: :ok
+
+  defp validate_retention!(other) do
+    raise ArgumentError,
+          "tool_retention must be %{mode: :age | :count, value: pos_integer, " <>
+            "never_evict: boolean}, got: #{inspect(other)}"
   end
 
   defp validate_transformer!(nil), do: :ok

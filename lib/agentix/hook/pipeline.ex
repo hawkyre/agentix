@@ -128,10 +128,10 @@ defmodule Agentix.Hook.Pipeline do
     :ok
   end
 
-  # v0 token heuristic: byte/4 over text parts (non-text parts cost 0 here). Converges
-  # with Inc 8's Agentix.Tokenizer.
+  # Sized via the shared Agentix.Tokenizer (Inc 8) so the injection reserve and the
+  # compaction budget speak the same units. Non-text parts cost 0 here.
   defp injection_tokens(parts), do: parts |> Enum.map(&part_tokens/1) |> Enum.sum()
 
-  defp part_tokens(%{text: text}) when is_binary(text), do: div(byte_size(text), 4)
+  defp part_tokens(%{text: text}) when is_binary(text), do: Agentix.Tokenizer.count(text)
   defp part_tokens(_part), do: 0
 end

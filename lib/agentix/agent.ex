@@ -36,6 +36,7 @@ defmodule Agentix.Agent do
   @behaviour :gen_statem
 
   alias Agentix.Codec
+  alias Agentix.Compaction
   alias Agentix.Conversation.Config
   alias Agentix.Event
   alias Agentix.Events.Publisher
@@ -416,8 +417,23 @@ defmodule Agentix.Agent do
       %{conversation_id: data.conversation_id, turn_ref: data.turn.ref}
     )
 
+    maybe_summarize(data)
     finish(data, :idle)
   end
+
+  # Between turns: if the free reducers left the rendered context over budget, kick off
+  # prefix-ward summarization off the critical path — it writes a `summaries` row the
+  # next assembly reads. Best-effort; failure just means the next over-budget turn
+  # retries. Never on the turn's hot path (it ran in `streaming`, this is at the end).
+  defp maybe_summarize(%Data{turn: %{context: %Context{} = context}} = data) do
+    if Compaction.over_budget?(context, compaction_budget(data.config)) do
+      Compaction.Summarize.start(data.conversation_id, data.config)
+    end
+
+    :ok
+  end
+
+  defp maybe_summarize(_data), do: :ok
 
   # The stream failed (provider error or task crash). Record the partial text we did
   # receive (if any) so the log keeps a faithful assistant turn, then return to idle.
@@ -961,22 +977,36 @@ defmodule Agentix.Agent do
     end
   end
 
-  ## Context assembly (compaction plugs in here — Inc 8)
+  ## Context assembly + compaction (Inc 8)
 
+  # Read "latest summary + events after it" (load_since), render to messages, then run
+  # the free compaction reducers to fit the budget. With no summary this is identical
+  # to streaming all events. The injection reserve is carved out of the budget so
+  # pre-hook injections (added at the tail afterward) stay within the window (D7).
   defp assemble_context(data) do
-    history =
-      data.conversation_id
-      |> Persistence.stream_events()
-      |> Enum.flat_map(&event_to_messages/1)
+    {summary, events} = Persistence.load_since(data.conversation_id)
+    history = Enum.flat_map(events, &event_to_messages/1)
+    base = Context.new(system_prefix(data.config) ++ summary_prefix(summary) ++ history)
+    Compaction.compact(base, compaction_budget(data.config), data.config)
+  end
 
-    system =
-      case data.config.system_prompt do
-        nil -> []
-        "" -> []
-        prompt -> [Context.system(prompt)]
-      end
+  defp system_prefix(config) do
+    case config.system_prompt do
+      nil -> []
+      "" -> []
+      prompt -> [Context.system(prompt)]
+    end
+  end
 
-    Context.new(system ++ history)
+  defp summary_prefix(nil), do: []
+
+  defp summary_prefix(summary) do
+    content = summary[:content] || summary["content"]
+    [Codec.decode_message(content["message"] || content[:message])]
+  end
+
+  defp compaction_budget(config) do
+    Compaction.Budget.new(max(0, config.working_budget - config.injection_reserve))
   end
 
   # Maps a log event to the messages the model sees. `:tool_call` events carry no
