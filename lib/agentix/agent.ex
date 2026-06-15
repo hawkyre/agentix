@@ -153,7 +153,7 @@ defmodule Agentix.Agent do
 
     # Pre-hooks run inline here (like context assembly itself); they inject context
     # and may halt the turn before any model call. Injections land at the context tail.
-    case run_pre_hooks(data, build_hook_turn(data, base)) do
+    case run_pre_hooks(data, base) do
       {:cont, %Turn{} = turn} ->
         launch_stream(data, apply_injections(turn.context, turn.injections))
 
@@ -893,8 +893,9 @@ defmodule Agentix.Agent do
   # into a turn halt rather than crashing into a restart loop. Only the exception
   # *message* (not the struct) reaches the halt reason → telemetry, to avoid leaking
   # closure-captured data into metrics handlers.
-  defp run_pre_hooks(data, turn) do
+  defp run_pre_hooks(data, base) do
     config = data.config
+    turn = build_hook_turn(data, base)
     Pipeline.run_pre(turn, pre_hooks(config), config.injection_reserve, config.hook_timeout)
   rescue
     e in OverflowError ->
