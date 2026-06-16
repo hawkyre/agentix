@@ -51,7 +51,8 @@ defmodule AgentixApi do
 
   # `timeout` is a wall-clock deadline, not a per-message idle timer, so a slow stream can't
   # outrun it. Every terminal turn event ends the loop — including `:turn_halted` (a hook
-  # halt), which would otherwise block until the deadline.
+  # halt). Other live events (state changes, tool lifecycle, thinking deltas) are drained
+  # rather than left to pile up in a long-lived caller's mailbox.
   defp collect_reply(acc, deadline) do
     remaining = max(0, deadline - System.monotonic_time(:millisecond))
 
@@ -60,6 +61,7 @@ defmodule AgentixApi do
       {:turn_completed, _turn_ref} -> acc
       {:cancelled, _turn_ref} -> acc
       {:turn_halted, _turn_ref, _reason} -> acc
+      _other -> collect_reply(acc, deadline)
     after
       remaining -> acc
     end

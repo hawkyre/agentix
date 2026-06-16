@@ -29,7 +29,7 @@ defmodule AgentixDemoWeb.Layouts do
           const liveSocket = new LiveSocket("/live", Socket, {params: {_csrf_token: csrf}, hooks: {AgentixStream, AgentixComposer}})
           liveSocket.connect()
         </script>
-        {Phoenix.HTML.raw("<style>" <> Agentix.Components.css() <> "</style>")}
+        {Phoenix.HTML.raw("<style>" <> AgentixDemoWeb.AgentixComponents.css() <> "</style>")}
       </head>
       <body class="bg-neutral-50 text-neutral-900 antialiased">
         <main class="mx-auto max-w-3xl px-5">

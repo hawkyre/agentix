@@ -41,13 +41,5 @@ defmodule Mix.Tasks.Agentix.Gen.Migration do
   end
 
   # Ecto's migration timestamp format: UTC, second resolution, zero-padded.
-  defp timestamp do
-    {{y, m, d}, {hh, mm, ss}} = :calendar.universal_time()
-
-    [y, m, d, hh, mm, ss]
-    |> Enum.zip([4, 2, 2, 2, 2, 2])
-    |> Enum.map_join(fn {value, width} ->
-      value |> Integer.to_string() |> String.pad_leading(width, "0")
-    end)
-  end
+  defp timestamp, do: Calendar.strftime(DateTime.utc_now(), "%Y%m%d%H%M%S")
 end

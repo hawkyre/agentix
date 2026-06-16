@@ -21,7 +21,7 @@ defmodule Mix.Tasks.Agentix.Gen.Components do
   def run(args) do
     {opts, paths} = OptionParser.parse!(args, strict: [module: :string, force: :boolean])
     dir = path!(paths)
-    module = opts[:module] || "AgentixComponents"
+    module = validate_module!(opts[:module] || "AgentixComponents")
 
     contents =
       :agentix
@@ -48,6 +48,16 @@ defmodule Mix.Tasks.Agentix.Gen.Components do
 
   defp path!([]) do
     Mix.raise("expected a target directory: mix agentix.gen.components DIR [--module MODULE]")
+  end
+
+  # The module name is spliced into generated source, so reject anything that isn't a plain
+  # dotted Elixir alias (no whitespace, no injected code).
+  defp validate_module!(module) do
+    if Regex.match?(~r/\A[A-Z][A-Za-z0-9_]*(\.[A-Z][A-Za-z0-9_]*)*\z/, module) do
+      module
+    else
+      Mix.raise("invalid --module #{inspect(module)}: expected a name like MyAppWeb.Components")
+    end
   end
 
   defp rename_module(contents, "AgentixComponents"), do: contents
