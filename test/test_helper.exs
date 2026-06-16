@@ -13,4 +13,6 @@ Application.put_env(:agentix, Endpoint,
 
 {:ok, _} = Endpoint.start_link()
 
-ExUnit.start(exclude: [:integration])
+# `:postgres` tests need a real database (the Ecto adapter); excluded by default, run
+# with `mix test --include postgres` (see Agentix.Persistence.EctoTest).
+ExUnit.start(exclude: [:integration, :postgres])

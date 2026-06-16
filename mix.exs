@@ -50,6 +50,7 @@ defmodule Agentix.MixProject do
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(:dev), do: ["lib", "dev"]
   defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
@@ -64,6 +65,13 @@ defmodule Agentix.MixProject do
       # Headless/API consumers omit it entirely; its modules are conditionally defined.
       {:phoenix_live_view, "~> 1.2", optional: true},
 
+      # Optional — the Ecto/Postgres persistence adapter (`Agentix.Persistence.Ecto`)
+      # and its Oban-backed expiry. ETS (the default) and core need none of these; a
+      # host opts in by depending on them and configuring the Ecto adapter.
+      {:ecto_sql, "~> 3.14", optional: true},
+      {:postgrex, "~> 0.21", optional: true},
+      {:oban, "~> 2.20", optional: true},
+
       # Dev/test tooling
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
@@ -72,7 +80,9 @@ defmodule Agentix.MixProject do
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:excoveralls, "~> 0.18", only: :test, runtime: false},
       # `Phoenix.LiveViewTest` parses rendered markup through LazyHTML.
-      {:lazy_html, "~> 0.1", only: :test}
+      {:lazy_html, "~> 0.1", only: :test},
+      # Dev-only HTTP server for the throwaway demo harness under `dev/`.
+      {:bandit, "~> 1.0", only: :dev}
     ]
   end
 

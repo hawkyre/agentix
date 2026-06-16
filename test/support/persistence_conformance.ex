@@ -50,14 +50,17 @@ defmodule Agentix.PersistenceConformance do
 
       test "append assigns ascending per-conversation seq and reads in order" do
         conv = uid("conv")
-        {:ok, s1} = @adapter.append_event(conv, Event.new(:user_msg, %{n: 1}))
-        {:ok, s2} = @adapter.append_event(conv, Event.new(:assistant_msg, %{n: 2}))
+        # Event content is asserted with **string keys**: that is its canonical persisted
+        # form (the agent writes Codec/JSON output), and the only form a jsonb-backed
+        # adapter can round-trip. Both adapters must agree on it.
+        {:ok, s1} = @adapter.append_event(conv, Event.new(:user_msg, %{"n" => 1}))
+        {:ok, s2} = @adapter.append_event(conv, Event.new(:assistant_msg, %{"n" => 2}))
 
         assert {s1, s2} == {1, 2}
         events = @adapter.stream_events(conv)
         assert Enum.map(events, & &1.seq) == [1, 2]
         assert Enum.map(events, & &1.type) == [:user_msg, :assistant_msg]
-        assert Enum.map(events, & &1.content) == [%{n: 1}, %{n: 2}]
+        assert Enum.map(events, & &1.content) == [%{"n" => 1}, %{"n" => 2}]
         assert Enum.all?(events, &(&1.conversation_id == conv))
       end
 
