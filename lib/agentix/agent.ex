@@ -752,11 +752,16 @@ defmodule Agentix.Agent do
   end
 
   defp approve_call(data, id, %Tool{executor: :client}, _scope) do
-    # Gated client: second suspension for the actual client execution.
+    # Gated client: second suspension for the actual client execution. Re-arm both timers
+    # from this moment — including the durable expiry (cancel + reschedule) — so the
+    # backstop tracks the second phase's deadline instead of firing early off the first
+    # suspension's clock.
     call = current_call(data, id)
     cancel_timer(call.timer)
+    Persistence.cancel_expiry(data.conversation_id, id)
     Publisher.suspended(data.publisher, id, :client, %{kind: :client_exec, args: call.args})
     timer = arm_timeout(data, id)
+    Persistence.schedule_expiry(data.conversation_id, id, data.config.default_timeout)
     update_call(data, id, %{call | phase: :awaiting_exec, timer: timer})
   end
 
@@ -826,19 +831,10 @@ defmodule Agentix.Agent do
   # All tool results are in — feed them back to the model in a new model call under
   # the *same* turn (a tool loop is several model calls per turn, not a new turn).
   defp continue_turn(data) do
-    turn = %{
-      data.turn
-      | msg_id: new_msg_id(),
-        task_pid: nil,
-        monitor_ref: nil,
-        cancel: nil,
-        context: nil,
-        text: "",
-        thinking: "",
-        delta_seq: 0,
-        calls: %{},
-        task_index: %{}
-    }
+    # A blank turn that keeps the loop's `ref` (so this turn's tool tasks/events stay keyed
+    # to it) but gets a fresh `msg_id` and zeroed accumulators. Derived from `base_turn/1`
+    # so any new turn field stays in sync automatically.
+    turn = %{base_turn(data.turn.scope) | ref: data.turn.ref}
 
     Publisher.state_changed(data.publisher, :preparing)
     {:next_state, :preparing, %{data | turn: turn}, [{:next_event, :internal, :assemble}]}
@@ -943,7 +939,7 @@ defmodule Agentix.Agent do
   # Server tool calls dispatched and still running (suspended calls are `pending`).
   defp in_flight_view(%{calls: calls}) do
     for {id, %{phase: :running, tool: tool} = call} <- calls, tool != nil, into: %{} do
-      {id, %{name: call.name, executor: tool.executor, progress: nil}}
+      {id, %{name: call.name, executor: tool.executor, status: :running}}
     end
   end
 
@@ -1227,14 +1223,19 @@ defmodule Agentix.Agent do
   defp event_to_messages(_event), do: []
 
   # Agentix stamps internal bookkeeping onto `Message.metadata` (a stream `id`, a turn
-  # `status`, a tool's display `name`/`status`). None of it is meant for the model — but
-  # the OpenAI-format encoder serializes `Message.metadata` verbatim onto the wire, so the
-  # model boundary drops the known internal keys. Provider-meaningful metadata (atom-keyed,
-  # e.g. Anthropic's `:is_error`) is deliberately left untouched.
-  @internal_metadata_keys ~w(id status tool_name tool_status)
+  # `status`, a tool's display `name`/`status`) — none of it for the model. The OpenAI-format
+  # encoder serializes `Message.metadata` verbatim onto the wire, so the model boundary keeps
+  # only an allowlist of provider-meaningful keys and drops everything else; an unknown key
+  # (a new internal stamp, a provider response field) can never leak by default.
+  #
+  # The allowlist is empty today: nothing in Agentix puts a provider-meaningful key on
+  # `Message.metadata`. Provider hints ride elsewhere — `:cache_control` on `ContentPart`
+  # metadata (the only key ReqLLM's content encoder forwards) and provider data on
+  # `Message.provider_data` — neither of which this touches.
+  @wire_metadata_keys []
 
   defp strip_internal_metadata(%Message{metadata: metadata} = message) when is_map(metadata),
-    do: %{message | metadata: Map.drop(metadata, @internal_metadata_keys)}
+    do: %{message | metadata: Map.take(metadata, @wire_metadata_keys)}
 
   defp strip_internal_metadata(message), do: message
 

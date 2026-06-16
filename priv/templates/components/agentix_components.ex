@@ -445,7 +445,7 @@
     defp banner_class(_variant),
       do: "border-red-300/70 bg-red-50 dark:border-red-500/30 dark:bg-red-500/10"
 
-    defp banner_icon(:warning), do: :warning
+    # One glyph for both variants; the colour (see `banner_icon_color/1`) distinguishes them.
     defp banner_icon(_variant), do: :warning
     defp banner_icon_color(:warning), do: "text-amber-600 dark:text-amber-500"
     defp banner_icon_color(_variant), do: "text-red-600 dark:text-red-500"

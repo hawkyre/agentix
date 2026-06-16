@@ -264,19 +264,30 @@ if Code.ensure_loaded?(Ecto) do
     @impl true
     def schedule_expiry(conversation_id, tool_call_id, timeout_ms) do
       if oban_available?() do
-        # `replace: [scheduled: [:scheduled_at]]` makes a reschedule of the same call move
-        # the existing job's fire time rather than leaking a second timer.
-        %{conversation_id: conversation_id, tool_call_id: tool_call_id}
-        |> ExpiryWorker.new(
-          scheduled_at: DateTime.add(DateTime.utc_now(), timeout_ms, :millisecond),
-          replace: [scheduled: [:scheduled_at]]
-        )
-        |> Oban.insert!()
+        insert_expiry(conversation_id, tool_call_id, timeout_ms)
       else
         warn_no_oban()
       end
 
       :ok
+    end
+
+    # The durable expiry is a best-effort backstop — the agent's in-process timer is the
+    # primary timeout — so a scheduling failure (a DB hiccup, or Oban loaded but not
+    # started) degrades to a warning rather than crashing the agent mid-suspension.
+    # `replace:` on both `:scheduled` and `:available` moves an existing job's fire time on
+    # a reschedule (an already-staged job sits in `:available`) instead of leaking a timer.
+    defp insert_expiry(conversation_id, tool_call_id, timeout_ms) do
+      %{conversation_id: conversation_id, tool_call_id: tool_call_id}
+      |> ExpiryWorker.new(
+        scheduled_at: DateTime.add(DateTime.utc_now(), timeout_ms, :millisecond),
+        replace: [scheduled: [:scheduled_at], available: [:scheduled_at]]
+      )
+      |> Oban.insert!()
+    rescue
+      error -> warn_expiry_failed(tool_call_id, error)
+    catch
+      :exit, reason -> warn_expiry_failed(tool_call_id, reason)
     end
 
     @impl true
@@ -442,7 +453,15 @@ if Code.ensure_loaded?(Ecto) do
     defp decode_pending_kv(k, v) when k in ["prompt", :prompt], do: {:prompt, v}
     defp decode_pending_kv(k, v), do: {k, v}
 
-    defp atomize(value) when is_binary(value), do: String.to_existing_atom(value)
+    defp atomize(value) when is_binary(value) do
+      String.to_existing_atom(value)
+    rescue
+      # A value from a newer schema version or a tampered row may not be a known atom.
+      # Every consumer (state/executor/kind → the phase clauses) tolerates a string via a
+      # catch-all, so pass it through rather than crashing the read — and thus revival.
+      ArgumentError -> value
+    end
+
     defp atomize(value), do: value
 
     ## --- adapter wiring ---
@@ -476,6 +495,15 @@ if Code.ensure_loaded?(Ecto) do
             "disabled (in-process timeout only). Add {:oban, \"~> 2.20\"} to enable it."
         )
       end
+    end
+
+    defp warn_expiry_failed(tool_call_id, reason) do
+      require Logger
+
+      Logger.warning(
+        "Agentix.Persistence.Ecto: failed to schedule durable expiry for #{tool_call_id} " <>
+          "(#{inspect(reason)}); the in-process timeout still applies."
+      )
     end
   end
 end

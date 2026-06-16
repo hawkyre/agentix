@@ -107,18 +107,17 @@ defmodule Agentix.ToolFlowTest do
       assert_receive {:turn_completed, _ref}
 
       # The second model call carries the prior turn back to the provider. NO message in
-      # that context may carry Agentix's internal metadata — the OpenAI-format encoder
-      # serializes `Message.metadata` verbatim onto the wire. This covers the tool row's
-      # `tool_name`/`tool_status` AND the assistant row's `id`/`status` bookkeeping.
-      internal_keys = ~w(id status tool_name tool_status)
+      # that context may carry ANY `Message.metadata` — the model boundary keeps only an
+      # (empty) allowlist of provider-meaningful keys, so the tool row's `tool_name`/
+      # `tool_status`, the assistant row's `id`/`status`, AND any other key are all dropped.
       second_call = Enum.at(MockProvider.requests(), 1)
 
       assert Enum.find(second_call.context.messages, &(&1.role == :tool)),
              "expected a tool message in the follow-up model context"
 
-      for msg <- second_call.context.messages, key <- internal_keys do
-        refute Map.has_key?(msg.metadata || %{}, key),
-               "internal metadata #{inspect(key)} leaked to the model on a #{msg.role} message"
+      for msg <- second_call.context.messages do
+        assert (msg.metadata || %{}) == %{},
+               "metadata #{inspect(msg.metadata)} leaked to the model on a #{msg.role} message"
       end
 
       # And the same at the wire level: the OpenAI-format encoder serializes

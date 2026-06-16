@@ -170,7 +170,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     def apply_event(socket, {:tool_progress, id, progress}) do
       update(socket, :in_flight_tools, fn tools ->
         case tools do
-          %{^id => entry} -> Map.put(tools, id, %{entry | progress: progress})
+          %{^id => entry} -> Map.put(tools, id, Map.put(entry, :progress, progress))
           _ -> tools
         end
       end)
