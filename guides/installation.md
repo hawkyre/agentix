@@ -80,7 +80,7 @@ Add the host-provided Ecto/Oban stack to make conversations and suspension expir
 restart:
 
 ```elixir
-{:ecto_sql, "~> 3.14"}, {:postgrex, "~> 0.21"}, {:oban, "~> 2.20"}
+{:ecto_sql, "~> 3.14"}, {:postgrex, "~> 0.22"}, {:oban, "~> 2.20"}
 ```
 
 ```elixir

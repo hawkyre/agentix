@@ -1,4 +1,4 @@
-defmodule Agentix.Repo.Migrations.CreateAgentixTables do
+defmodule AgentixDemo.Repo.Migrations.CreateAgentixTables do
   @moduledoc """
   Creates the five Agentix tables for the Ecto/Postgres persistence adapter.
 

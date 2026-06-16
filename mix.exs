@@ -69,7 +69,7 @@ defmodule Agentix.MixProject do
       # and its Oban-backed expiry. ETS (the default) and core need none of these; a
       # host opts in by depending on them and configuring the Ecto adapter.
       {:ecto_sql, "~> 3.14", optional: true},
-      {:postgrex, "~> 0.21", optional: true},
+      {:postgrex, "~> 0.22", optional: true},
       {:oban, "~> 2.20", optional: true},
 
       # Dev/test tooling

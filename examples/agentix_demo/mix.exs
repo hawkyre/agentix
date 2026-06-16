@@ -35,7 +35,7 @@ defmodule AgentixDemo.MixProject do
       {:phoenix_live_view, "~> 1.2"},
       {:phoenix_html, "~> 4.1"},
       {:ecto_sql, "~> 3.14"},
-      {:postgrex, "~> 0.21"},
+      {:postgrex, "~> 0.22"},
       {:oban, "~> 2.20"},
       {:jason, "~> 1.4"},
       {:bandit, "~> 1.0"},
