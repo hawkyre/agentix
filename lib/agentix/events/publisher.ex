@@ -104,6 +104,10 @@ defmodule Agentix.Events.Publisher do
   def tool_call_started(ctx, id, name, executor, args),
     do: publish(ctx, {:tool_call_started, id, name, executor, args})
 
+  @doc "Broadcasts incremental progress for an in-flight tool call (→ `in_flight_tools`)."
+  @spec tool_progress(context(), String.t(), term()) :: :ok
+  def tool_progress(ctx, id, payload), do: publish(ctx, {:tool_progress, id, payload})
+
   @doc "Broadcasts that a tool call resolved with a successful result."
   @spec tool_call_resolved(context(), String.t(), term()) :: :ok
   def tool_call_resolved(ctx, id, result), do: publish(ctx, {:tool_call_resolved, id, result})

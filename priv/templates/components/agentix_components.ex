@@ -55,7 +55,7 @@
             id={id}
             name={t.name}
             status={Map.get(t, :status, :running)}
-            meta={Map.get(t, :meta)}
+            meta={tool_meta_label(t)}
           />
         </div>
         <.streaming_message :if={@streaming_message} message={@streaming_message} />
@@ -468,6 +468,11 @@
 
     defp tool_name(%{metadata: %{"tool_name" => name}}) when is_binary(name), do: name
     defp tool_name(_message), do: "tool"
+
+    # A live tool's status line: a binary `:tool_progress` payload if one has arrived, else
+    # any explicit `:meta`. Non-binary progress is left to a host's own renderer.
+    defp tool_meta_label(%{progress: progress}) when is_binary(progress), do: progress
+    defp tool_meta_label(tool), do: Map.get(tool, :meta)
 
     defp tool_status(%{metadata: %{"tool_status" => "error"}}), do: :error
     defp tool_status(_message), do: :ok

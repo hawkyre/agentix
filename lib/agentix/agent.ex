@@ -388,8 +388,24 @@ defmodule Agentix.Agent do
     {:keep_state_and_data, [{:reply, from, live_turn_view(state, data)}]}
   end
 
+  # A `:server` tool reported progress via `Agentix.Turn.report_progress/2`; rebroadcast it on
+  # the live plane while its turn is current. Served from any state (a tool can report while
+  # the agent is executing other tools or awaiting input); stale signals fall through below.
+  defp handle_common(
+         _state,
+         :info,
+         {:tool_progress, ref, id, payload},
+         %Data{turn: %{ref: ref}} = data
+       ) do
+    Publisher.tool_progress(data.publisher, id, payload)
+    :keep_state_and_data
+  end
+
   # Late tool-task signals from a finished/superseded turn.
   defp handle_common(_state, :info, {:tool_done, _ref, _id, _result}, _data),
+    do: :keep_state_and_data
+
+  defp handle_common(_state, :info, {:tool_progress, _ref, _id, _payload}, _data),
     do: :keep_state_and_data
 
   defp handle_common(_state, :info, {:tool_timeout, _ref, _id}, _data), do: :keep_state_and_data

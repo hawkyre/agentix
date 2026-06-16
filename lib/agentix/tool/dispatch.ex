@@ -18,6 +18,10 @@ defmodule Agentix.Tool.Dispatch do
   """
   @spec run_server(pid(), term(), String.t(), Tool.t(), map(), Turn.t()) :: Task.t()
   def run_server(agent, turn_ref, tool_call_id, %Tool{callback: callback}, args, %Turn{} = turn) do
+    # Stamp the call's coordinates so the callback can stream progress back via
+    # `Agentix.Turn.report_progress/2`.
+    turn = %{turn | agent: agent, tool_call_id: tool_call_id}
+
     Task.Supervisor.async_nolink(Agentix.TaskSupervisor, fn ->
       result =
         try do

@@ -29,6 +29,7 @@ defmodule Agentix.ToolFlowTest do
   alias Agentix.Test.MockProvider
   alias Agentix.Tool
   alias Agentix.ToolFlowTest.ScriptProvider
+  alias Agentix.Turn
   alias ReqLLM.Message
   alias ReqLLM.Message.ContentPart
   alias ReqLLM.Provider.Defaults
@@ -86,6 +87,31 @@ defmodule Agentix.ToolFlowTest do
       assert_tool_called(id, "weather")
       assert tool_result(id, "weather") == %{ok: true, result: "sunny in SF"}
       assert final_assistant_text(id) == "It is sunny."
+    end
+
+    test "a running tool streams progress via Turn.report_progress/2", %{id: id} do
+      slow =
+        Tool.new(
+          name: "fetch",
+          executor: :server,
+          callback: fn _args, turn ->
+            Turn.report_progress(turn, "fetching…")
+            {:ok, "fetched"}
+          end
+        )
+
+      MockProvider.script([
+        completion("", tool_calls: [{"fetch", %{}}]),
+        completion("Got it.")
+      ])
+
+      {:ok, _pid} = Conversation.ensure_started(id, config: config([slow]))
+      :ok = Conversation.send_message(id, "go", Scope.new())
+
+      assert_receive {:tool_call_started, tid, "fetch", :server, _args}
+      assert_receive {:tool_progress, ^tid, "fetching…"}
+      assert_receive {:tool_call_resolved, ^tid, %{ok: true}}
+      assert_receive {:turn_completed, _ref}
     end
 
     test "tool messages reach the model clean; UI metadata stays on the history path only",
