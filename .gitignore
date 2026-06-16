@@ -9,6 +9,11 @@ erl_crash.dump
 agentix-*.tar
 /tmp/
 
+# Example apps build artifacts (mix.lock IS committed for reproducible example builds)
+/examples/*/_build/
+/examples/*/deps/
+/examples/*/cover/
+
 # Dialyzer PLTs
 /priv/plts/*.plt
 /priv/plts/*.plt.hash

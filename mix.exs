@@ -118,7 +118,7 @@ defmodule Agentix.MixProject do
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
       files:
-        ~w(lib priv/static priv/templates mix.exs README.md CHANGELOG.md LICENSE .formatter.exs)
+        ~w(lib priv/static priv/templates guides mix.exs README.md CHANGELOG.md LICENSE .formatter.exs)
     ]
   end
 
@@ -126,7 +126,7 @@ defmodule Agentix.MixProject do
     [
       main: "Agentix",
       source_ref: "v#{@version}",
-      extras: ["README.md", "CHANGELOG.md"]
+      extras: ["README.md", "guides/installation.md", "CHANGELOG.md"]
     ]
   end
 end

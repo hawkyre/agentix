@@ -73,3 +73,53 @@ jobs:
       # The DB-free suite runs above (`:postgres` excluded by default); this runs only the
       # Ecto-adapter tests against the Postgres service.
       - run: mix test --only postgres
+
+  external-consume:
+    name: External consumption (examples)
+    runs-on: ubuntu-latest
+    # Proves the optional-dep wiring for a genuine downstream consumer: a Tier-1 headless
+    # app (no LiveView/DB) and a Tier-3 app (LiveView + Postgres + Oban), each depending on
+    # Agentix via `path:`. Dialyzer is intentionally skipped to avoid a second PLT build.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agentix_demo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up BEAM
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20"
+          otp-version: "28"
+
+      # Tier 1 — headless / API-only. No LiveView, no database; the optional modules must
+      # not even compile (asserted inside the suite).
+      - name: agentix_api (Tier 1)
+        working-directory: examples/agentix_api
+        run: |
+          mix deps.get
+          mix compile
+          mix test
+
+      # Tier 3 — LiveView + durable Postgres persistence + Oban-backed expiry.
+      - name: agentix_demo (Tier 3)
+        working-directory: examples/agentix_demo
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/agentix_demo_test
+        run: |
+          mix deps.get
+          mix agentix.gen.components lib/agentix_demo_web --module AgentixDemoWeb.AgentixComponents
+          mix ecto.create
+          mix ecto.migrate
+          mix test
