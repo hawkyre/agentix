@@ -9,7 +9,8 @@ defmodule Mix.Tasks.Agentix.Gen.Components do
       mix agentix.gen.components lib/my_app_web/components --module MyAppWeb.AgentixComponents
 
   Writes one module file under the given directory. With no `--module`, the module is
-  `AgentixComponents`; otherwise the file is named after the module's last segment.
+  `AgentixComponents`; otherwise the file is named after the module's last segment. An
+  existing file is left untouched (you own it after copying) unless you pass `--force`.
   """
 
   use Mix.Task
@@ -18,7 +19,7 @@ defmodule Mix.Tasks.Agentix.Gen.Components do
 
   @impl Mix.Task
   def run(args) do
-    {opts, paths} = OptionParser.parse!(args, strict: [module: :string])
+    {opts, paths} = OptionParser.parse!(args, strict: [module: :string, force: :boolean])
     dir = path!(paths)
     module = opts[:module] || "AgentixComponents"
 
@@ -30,8 +31,16 @@ defmodule Mix.Tasks.Agentix.Gen.Components do
 
     File.mkdir_p!(dir)
     target = Path.join(dir, file_name(module))
-    File.write!(target, contents)
-    Mix.shell().info([:green, "* creating ", :reset, target])
+
+    if File.exists?(target) and not Keyword.get(opts, :force, false) do
+      # The host owns and edits this file once copied — don't clobber their changes on a
+      # re-run (e.g. after a library upgrade). Pass `--force` to overwrite.
+      Mix.shell().info([:yellow, "* exists ", :reset, "#{target} (use --force to overwrite)"])
+    else
+      File.write!(target, contents)
+      Mix.shell().info([:green, "* creating ", :reset, target])
+    end
+
     target
   end
 

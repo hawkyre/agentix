@@ -23,16 +23,21 @@ defmodule Mix.Tasks.Agentix.Gen.Migration do
     {_opts, paths} = OptionParser.parse!(args, strict: [])
     dir = List.first(paths) || @default_dir
 
-    contents =
-      :agentix
-      |> Application.app_dir(@template)
-      |> File.read!()
+    case Path.wildcard(Path.join(dir, "*_create_agentix_tables.exs")) do
+      [existing | _] ->
+        # The migration's module name is fixed, so a second copy (a re-run) would clash on
+        # compile and break `mix ecto.migrate`. Skip rather than write a conflicting file.
+        Mix.shell().info([:yellow, "* skipping ", :reset, "#{existing} already exists"])
+        existing
 
-    File.mkdir_p!(dir)
-    target = Path.join(dir, "#{timestamp()}_create_agentix_tables.exs")
-    File.write!(target, contents)
-    Mix.shell().info([:green, "* creating ", :reset, target])
-    target
+      [] ->
+        contents = :agentix |> Application.app_dir(@template) |> File.read!()
+        File.mkdir_p!(dir)
+        target = Path.join(dir, "#{timestamp()}_create_agentix_tables.exs")
+        File.write!(target, contents)
+        Mix.shell().info([:green, "* creating ", :reset, target])
+        target
+    end
   end
 
   # Ecto's migration timestamp format: UTC, second resolution, zero-padded.

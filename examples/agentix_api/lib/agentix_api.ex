@@ -22,10 +22,15 @@ defmodule AgentixApi do
     Conversation.ensure_started(conversation_id, config: Config.new(opts))
   end
 
-  @doc "Subscribes the caller to the conversation's live-event topic on Agentix's PubSub."
+  @doc """
+  Subscribes the caller to the conversation's live-event topic on the configured PubSub —
+  the same bus the agent publishes on, so a host that sets `config :agentix, :pubsub` still
+  receives events.
+  """
   @spec subscribe(String.t()) :: :ok | {:error, term()}
   def subscribe(conversation_id) do
-    Phoenix.PubSub.subscribe(Agentix.PubSub, Publisher.topic(conversation_id))
+    pubsub = Application.get_env(:agentix, :pubsub, Agentix.PubSub)
+    Phoenix.PubSub.subscribe(pubsub, Publisher.topic(conversation_id))
   end
 
   @doc "Sends a user message into the conversation under an anonymous scope."
@@ -40,15 +45,23 @@ defmodule AgentixApi do
   concatenated text — exactly what an SSE/channel transport would forward token by token.
   """
   @spec collect_reply(timeout()) :: String.t()
-  def collect_reply(timeout \\ 5_000), do: collect_reply("", timeout)
+  def collect_reply(timeout \\ 5_000) do
+    collect_reply("", System.monotonic_time(:millisecond) + timeout)
+  end
 
-  defp collect_reply(acc, timeout) do
+  # `timeout` is a wall-clock deadline, not a per-message idle timer, so a slow stream can't
+  # outrun it. Every terminal turn event ends the loop — including `:turn_halted` (a hook
+  # halt), which would otherwise block until the deadline.
+  defp collect_reply(acc, deadline) do
+    remaining = max(0, deadline - System.monotonic_time(:millisecond))
+
     receive do
-      {:text_delta, _turn_ref, _msg_id, chunk, _seq} -> collect_reply(acc <> chunk, timeout)
+      {:text_delta, _turn_ref, _msg_id, chunk, _seq} -> collect_reply(acc <> chunk, deadline)
       {:turn_completed, _turn_ref} -> acc
       {:cancelled, _turn_ref} -> acc
+      {:turn_halted, _turn_ref, _reason} -> acc
     after
-      timeout -> acc
+      remaining -> acc
     end
   end
 end
