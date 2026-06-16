@@ -27,10 +27,19 @@ defmodule Agentix.Test do
   @spec install_mock_provider() :: :ok
   def install_mock_provider do
     Application.put_env(:agentix, :provider, MockProvider)
+    ensure_mock_provider()
+  end
 
-    case MockProvider.start_link() do
+  # Start the MockProvider under ExUnit's per-test supervisor (matching
+  # `Agentix.Test.MockProviderTest`), so ExUnit terminates it and frees the shared global
+  # name deterministically before the next test's setup. A bare `start_link/0` linked it to
+  # the transient test process instead, so under load the dying agent's name lingered and
+  # the next test raced it — surfacing as `:noproc` on `script`/`reset` or leaked requests.
+  defp ensure_mock_provider do
+    case ExUnit.Callbacks.start_supervised(MockProvider) do
       {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> MockProvider.reset()
+      # Already supervised in this test (install called more than once) — clear its state.
+      {:error, _reason} -> MockProvider.reset()
     end
   end
 

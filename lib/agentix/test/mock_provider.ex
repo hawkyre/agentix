@@ -21,9 +21,9 @@ defmodule Agentix.Test.MockProvider do
   alias ReqLLM.ToolCall
 
   @spec start_link(keyword()) :: Agent.on_start()
-  def start_link(_opts \\ []) do
-    Agent.start_link(fn -> %{scripts: :queue.new(), requests: []} end, name: __MODULE__)
-  end
+  def start_link(_opts \\ []), do: Agent.start_link(&initial_state/0, name: __MODULE__)
+
+  defp initial_state, do: %{scripts: :queue.new(), requests: []}
 
   @doc """
   Enqueue one response spec (a map from `Agentix.Test.completion/2`) or a list of
@@ -44,7 +44,7 @@ defmodule Agentix.Test.MockProvider do
 
   @doc "Clear scripts and recorded requests."
   @spec reset() :: :ok
-  def reset, do: Agent.update(__MODULE__, fn _ -> %{scripts: :queue.new(), requests: []} end)
+  def reset, do: Agent.update(__MODULE__, fn _ -> initial_state() end)
 
   @impl Provider
   def stream(model, context, opts) do
