@@ -85,11 +85,17 @@ defmodule Agentix.Conversation.Config do
   `ArgumentError` if `:model` is missing/blank, if `working_budget`,
   `injection_reserve`, `default_timeout`, or `hook_timeout` is not a positive
   integer, if `stream_transformer` is neither `nil` nor a 1-arity function, or on
-  unknown keys.
+  unknown keys. String keys naming a known field are accepted (so a config can be rebuilt
+  from a persistence adapter that round-trips settings as JSON).
   """
+  @config_fields ~w(model system_prompt tools hooks stream_transformer working_budget
+                    injection_reserve tool_retention compaction_window default_timeout
+                    hook_timeout audit? persistence notifier pubsub)a
+  @field_strings Map.new(@config_fields, &{Atom.to_string(&1), &1})
+
   @spec new(keyword() | map()) :: t()
   def new(attrs) do
-    attrs = Map.new(attrs)
+    attrs = attrs |> Map.new() |> atomize_known_keys()
     validate_model!(Map.get(attrs, :model))
 
     config = struct!(__MODULE__, attrs)
@@ -101,6 +107,17 @@ defmodule Agentix.Conversation.Config do
     validate_retention!(config.tool_retention)
     validate_transformer!(config.stream_transformer)
     config
+  end
+
+  # Revival from the Ecto adapter hands settings back as a **string-keyed** JSON map; the
+  # ETS adapter hands them back atom-keyed. Convert string keys that name a known field to
+  # the atom; a string key that isn't a field stays a string and `struct!/2` raises on it
+  # (preserving the "unknown keys raise" contract).
+  defp atomize_known_keys(attrs) do
+    Map.new(attrs, fn
+      {k, v} when is_atom(k) -> {k, v}
+      {k, v} when is_binary(k) -> {Map.get(@field_strings, k, k), v}
+    end)
   end
 
   defp validate_model!(model) when is_binary(model) and model != "", do: :ok

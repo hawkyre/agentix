@@ -142,7 +142,7 @@ if Code.ensure_loaded?(Ecto) do
 
       base
       |> Ecto.Changeset.change(%{
-        settings: Map.get(attrs, :settings, base.settings || %{}),
+        settings: sanitize_settings(Map.get(attrs, :settings, base.settings || %{})),
         fsm_state: Map.get(attrs, :fsm_state, base.fsm_state || %{}),
         status: Map.get(attrs, :status, base.status || :active)
       })
@@ -150,6 +150,18 @@ if Code.ensure_loaded?(Ecto) do
 
       :ok
     end
+
+    # Config settings carry functions/structs (`tools`, `hooks`, `stream_transformer`) and
+    # runtime wiring (`persistence`, `notifier`, `pubsub`) that have no JSON form. Drop them
+    # before the jsonb write; the host re-registers them at `ensure_started` (the ETS adapter
+    # keeps them verbatim, so this trimming is Ecto-only).
+    @nonserializable_settings ~w(tools hooks stream_transformer persistence notifier pubsub)
+    defp sanitize_settings(settings) when is_map(settings) do
+      drop = @nonserializable_settings ++ Enum.map(@nonserializable_settings, &String.to_atom/1)
+      Map.drop(settings, drop)
+    end
+
+    defp sanitize_settings(settings), do: settings
 
     @impl true
     def put_fsm_state(conversation_id, fsm_state),

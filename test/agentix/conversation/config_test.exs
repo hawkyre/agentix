@@ -47,4 +47,23 @@ defmodule Agentix.Conversation.ConfigTest do
   test "new/1 raises on unknown keys" do
     assert_raise KeyError, fn -> Config.new(model: "m", working_buget: 100) end
   end
+
+  test "new/1 accepts string keys naming a known field (revival from a JSON adapter)" do
+    config =
+      Config.new(%{
+        "model" => "openai:gpt-x",
+        "system_prompt" => "be terse",
+        "working_budget" => 16_000,
+        "audit?" => true
+      })
+
+    assert config.model == "openai:gpt-x"
+    assert config.system_prompt == "be terse"
+    assert config.working_budget == 16_000
+    assert config.audit? == true
+  end
+
+  test "new/1 still raises on an unknown string key" do
+    assert_raise KeyError, fn -> Config.new(%{"model" => "m", "working_buget" => 100}) end
+  end
 end
