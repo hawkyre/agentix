@@ -16,7 +16,9 @@ defmodule AgentixDemoWeb.ChatLive do
 
   @impl Phoenix.LiveView
   def mount(_params, session, socket) do
-    id = session["conversation_id"] || "demo-" <> Integer.to_string(System.unique_integer([:positive]))
+    id =
+      session["conversation_id"] || "demo-" <> Integer.to_string(System.unique_integer([:positive]))
+
     {:ok, _pid} = Conversation.ensure_started(id, config: config())
     # `attach_conversation` seeds the projection assigns; `:agentix_error` is only set when a
     # send fails, so seed it to nil for the initial render of the error banner.
@@ -59,6 +61,9 @@ defmodule AgentixDemoWeb.ChatLive do
 
   def handle_event("cancel", _params, socket), do: {:noreply, cancel(socket)}
 
+  # Talks to Anthropic Claude Haiku via ReqLLM — export ANTHROPIC_API_KEY before
+  # `mix phx.server`. The test suite installs the mock provider, so the model string is
+  # irrelevant there.
   defp config do
     ask_user =
       Tool.new(
@@ -67,6 +72,6 @@ defmodule AgentixDemoWeb.ChatLive do
         executor: :human
       )
 
-    Config.new(model: "mock:demo", tools: [ask_user])
+    Config.new(model: "anthropic:claude-haiku-4-5", tools: [ask_user])
   end
 end
