@@ -76,6 +76,7 @@ defmodule Agentix.Repo.Migrations.CreateAgentixTables do
         null: false
       )
 
+      add(:name, :text)
       add(:executor, :text, null: false)
       add(:status, :text, null: false, default: "pending")
       add(:args, :map)

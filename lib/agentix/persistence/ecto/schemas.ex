@@ -60,6 +60,7 @@ if Code.ensure_loaded?(Ecto.Schema) do
     @foreign_key_type :binary_id
     schema "agentix_tool_calls" do
       field(:conversation_id, :string)
+      field(:name, :string)
       field(:executor, Ecto.Enum, values: [:server, :human, :client, :provider])
 
       field(:status, Ecto.Enum,

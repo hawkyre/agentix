@@ -24,9 +24,15 @@ if Code.ensure_loaded?(Ecto) do
 
     ## Expiry
 
-    Suspension expiry is backed by Oban so it survives the agent being killed (a per-agent
-    timer would not). Oban is an **optional dependency of this adapter only**; every Oban
-    reference is guarded, and enabling Ecto-backed expiry without `:oban` raises.
+    `schedule_expiry/3` / `cancel_expiry/2` are backed by Oban, so a scheduled expiry lives
+    in the database and survives the agent being killed (a per-agent timer would not). Oban
+    is an **optional dependency of this adapter only**; every Oban reference is guarded, and
+    calling these without `:oban` raises.
+
+    > Note: the agent currently arms suspension timeouts with an in-process timer
+    > (`Agentix.Agent`); delegating that lifecycle to `schedule_expiry/3` so a *revived*
+    > agent's pending calls keep their timeout is a separate integration (see the Inc 11
+    > carry-forward in `.plans/`).
     """
 
     @behaviour Agentix.Persistence
@@ -156,10 +162,11 @@ if Code.ensure_loaded?(Ecto) do
     # before the jsonb write; the host re-registers them at `ensure_started` (the ETS adapter
     # keeps them verbatim, so this trimming is Ecto-only).
     @nonserializable_settings ~w(tools hooks stream_transformer persistence notifier pubsub)
-    defp sanitize_settings(settings) when is_map(settings) do
-      drop = @nonserializable_settings ++ Enum.map(@nonserializable_settings, &String.to_atom/1)
-      Map.drop(settings, drop)
-    end
+    @nonserializable_keys @nonserializable_settings ++
+                            Enum.map(@nonserializable_settings, &String.to_atom/1)
+
+    defp sanitize_settings(settings) when is_map(settings),
+      do: Map.drop(settings, @nonserializable_keys)
 
     defp sanitize_settings(settings), do: settings
 
@@ -182,6 +189,7 @@ if Code.ensure_loaded?(Ecto) do
       |> Ecto.Changeset.cast(attrs, [
         :id,
         :conversation_id,
+        :name,
         :executor,
         :status,
         :args,
@@ -357,6 +365,7 @@ if Code.ensure_loaded?(Ecto) do
       %{
         id: row.id,
         conversation_id: row.conversation_id,
+        name: row.name,
         executor: row.executor,
         status: row.status,
         args: row.args,
@@ -399,15 +408,12 @@ if Code.ensure_loaded?(Ecto) do
 
     # A tool result is `%{ok: bool, result: term}` or `%{ok: false, error: msg}`. Only the
     # top-level keys are atoms (the `result` value keeps whatever shape the tool returned).
+    @result_keys %{"ok" => :ok, "result" => :result, "error" => :error, "approved" => :approved}
+
     defp decode_result(nil), do: nil
 
-    defp decode_result(map) when is_map(map), do: Map.new(map, fn {k, v} -> {result_key(k), v} end)
-
-    defp result_key("ok"), do: :ok
-    defp result_key("result"), do: :result
-    defp result_key("error"), do: :error
-    defp result_key("approved"), do: :approved
-    defp result_key(other), do: other
+    defp decode_result(map) when is_map(map),
+      do: Map.new(map, fn {k, v} -> {Map.get(@result_keys, k, k), v} end)
 
     # `fsm_state` is the `%{state, pending, last_seq}` cache. `state` and each pending
     # entry's `executor`/`kind` are atoms; pending is keyed by tool_call_id (strings).
@@ -427,9 +433,14 @@ if Code.ensure_loaded?(Ecto) do
     defp decode_pending_entry(entry) when is_map(entry),
       do: Map.new(entry, fn {k, v} -> decode_pending_kv(k, v) end)
 
+    # The pending-entry shape (from the agent's `pending_subset/1`) is name/executor/kind/
+    # prompt; executor/kind carry atom values. Decode those explicitly and pass any other
+    # key through as a string rather than `String.to_existing_atom/1` — a key from a newer
+    # version or a tampered row must not crash the read (and thus agent revival).
     defp decode_pending_kv(k, v) when k in ["executor", :executor], do: {:executor, atomize(v)}
     defp decode_pending_kv(k, v) when k in ["kind", :kind], do: {:kind, atomize(v)}
-    defp decode_pending_kv(k, v) when is_binary(k), do: {String.to_existing_atom(k), v}
+    defp decode_pending_kv(k, v) when k in ["name", :name], do: {:name, v}
+    defp decode_pending_kv(k, v) when k in ["prompt", :prompt], do: {:prompt, v}
     defp decode_pending_kv(k, v), do: {k, v}
 
     defp atomize(value) when is_binary(value), do: String.to_existing_atom(value)

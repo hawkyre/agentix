@@ -14,32 +14,13 @@ defmodule Agentix.Persistence.EctoRevivalTest do
   alias Agentix.Events.Publisher
   alias Agentix.Persistence
   alias Agentix.Scope
+  alias Agentix.Test.EctoCase
   alias Agentix.Test.MockProvider
   alias Agentix.Tool
 
   @moduletag :postgres
-  @default_url "postgres://postgres:postgres@127.0.0.1:5433/agentix_test"
 
-  setup_all do
-    repo = Agentix.Test.Repo
-
-    Application.put_env(:agentix, repo,
-      url: System.get_env("DATABASE_URL", @default_url),
-      pool_size: 10
-    )
-
-    start_supervised!(repo)
-
-    Code.require_file("priv/templates/migration/create_agentix_tables.exs")
-    Ecto.Migrator.up(repo, 1, Agentix.Test.ObanMigration, log: false)
-    Ecto.Migrator.up(repo, 2, Agentix.Repo.Migrations.CreateAgentixTables, log: false)
-
-    start_supervised!({Oban, repo: repo, queues: [agentix_expiry: 5], stage_interval: 50})
-
-    Application.put_env(:agentix, :persistence, {Agentix.Persistence.Ecto, repo: repo})
-    on_exit(fn -> Application.delete_env(:agentix, :persistence) end)
-    :ok
-  end
+  setup_all do: EctoCase.start!()
 
   setup do
     install_mock_provider()

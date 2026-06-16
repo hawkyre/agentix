@@ -95,7 +95,7 @@ defmodule Agentix.Conversation.Config do
 
   @spec new(keyword() | map()) :: t()
   def new(attrs) do
-    attrs = attrs |> Map.new() |> atomize_known_keys()
+    attrs = attrs |> Map.new() |> atomize_known_keys() |> normalize_retention()
     validate_model!(Map.get(attrs, :model))
 
     config = struct!(__MODULE__, attrs)
@@ -119,6 +119,25 @@ defmodule Agentix.Conversation.Config do
       {k, v} when is_binary(k) -> {Map.get(@field_strings, k, k), v}
     end)
   end
+
+  # `tool_retention` is a nested map; a JSON round-trip (Ecto) makes its keys and the
+  # `:mode` value strings. Rebuild it atom-keyed (idempotent for the atom-keyed forms ETS
+  # and direct callers pass) so `validate_retention!/1` matches. Absent → struct default.
+  defp normalize_retention(%{tool_retention: %{} = retention} = attrs) do
+    %{
+      attrs
+      | tool_retention: %{
+          mode: atomize(retention["mode"] || retention[:mode]),
+          value: retention["value"] || retention[:value],
+          never_evict: retention["never_evict"] || retention[:never_evict] || false
+        }
+    }
+  end
+
+  defp normalize_retention(attrs), do: attrs
+
+  defp atomize(value) when is_binary(value), do: String.to_existing_atom(value)
+  defp atomize(value), do: value
 
   defp validate_model!(model) when is_binary(model) and model != "", do: :ok
 

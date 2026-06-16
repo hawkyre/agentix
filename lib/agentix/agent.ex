@@ -888,13 +888,18 @@ defmodule Agentix.Agent do
   defp phase_kind(tool, _phase), do: Tool.pending_kind(tool, :exec)
 
   # The renderer/persisted pending: only the awaiting-external subset.
+  # `tool` is nil only for a revived call whose tool is no longer in the config; skip it
+  # from the cache (the durable `pending_tool_calls` row remains authoritative for it).
   defp pending_subset(calls) do
-    for {id, %{phase: phase} = call} <- calls, awaiting?(phase), into: %{} do
+    for {id, %{phase: phase, tool: tool} = call} <- calls,
+        awaiting?(phase),
+        tool != nil,
+        into: %{} do
       {id,
        %{
          name: call.name,
-         executor: call.tool.executor,
-         kind: phase_kind(call.tool, phase),
+         executor: tool.executor,
+         kind: phase_kind(tool, phase),
          prompt: call.args
        }}
     end
@@ -919,8 +924,8 @@ defmodule Agentix.Agent do
 
   # Server tool calls dispatched and still running (suspended calls are `pending`).
   defp in_flight_view(%{calls: calls}) do
-    for {id, %{phase: :running} = call} <- calls, into: %{} do
-      {id, %{name: call.name, executor: call.tool.executor, progress: nil}}
+    for {id, %{phase: :running, tool: tool} = call} <- calls, tool != nil, into: %{} do
+      {id, %{name: call.name, executor: tool.executor, progress: nil}}
     end
   end
 
@@ -1267,7 +1272,8 @@ defmodule Agentix.Agent do
     calls =
       Map.new(pending, fn call ->
         meta = Map.get(cached, call.id, %{})
-        name = meta[:name] || Map.get(call, :name)
+        # The durable record is authoritative; the fsm_state cache is the fallback.
+        name = Map.get(call, :name) || meta[:name]
         phase = revive_phase(data.config, name, meta, call)
         {call.id, call_entry(find_tool(data.config, name), name, call.args, phase)}
       end)

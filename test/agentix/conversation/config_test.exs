@@ -54,13 +54,17 @@ defmodule Agentix.Conversation.ConfigTest do
         "model" => "openai:gpt-x",
         "system_prompt" => "be terse",
         "working_budget" => 16_000,
-        "audit?" => true
+        "audit?" => true,
+        # The nested tool_retention map round-trips through jsonb as fully string-keyed
+        # (keys and the :mode value); Config.new must rebuild it without raising.
+        "tool_retention" => %{"mode" => "count", "value" => 8, "never_evict" => true}
       })
 
     assert config.model == "openai:gpt-x"
     assert config.system_prompt == "be terse"
     assert config.working_budget == 16_000
     assert config.audit? == true
+    assert config.tool_retention == %{mode: :count, value: 8, never_evict: true}
   end
 
   test "new/1 still raises on an unknown string key" do
