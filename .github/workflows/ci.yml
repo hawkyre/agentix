@@ -7,6 +7,8 @@ on:
 
 env:
   MIX_ENV: test
+  # The Ecto adapter's `:postgres`-tagged tests read this; the service is defined below.
+  DATABASE_URL: postgres://postgres:postgres@localhost:5432/agentix_test
 
 permissions:
   contents: read
@@ -21,6 +23,20 @@ jobs:
         include:
           - elixir: "1.20"
             otp: "28"
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agentix_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -54,3 +70,6 @@ jobs:
       - run: mix deps.audit
       - run: mix dialyzer
       - run: mix coveralls
+      # The DB-free suite runs above (`:postgres` excluded by default); this runs only the
+      # Ecto-adapter tests against the Postgres service.
+      - run: mix test --only postgres

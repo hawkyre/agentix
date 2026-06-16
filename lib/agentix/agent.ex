@@ -196,7 +196,7 @@ defmodule Agentix.Agent do
           model_call_seq: last_model_call_seq(conversation_id, config)
         }
 
-        {state, actions} = recover(events)
+        {state, data, actions} = revive(data, events)
         {:ok, state, data, actions}
 
       :error ->
@@ -395,7 +395,19 @@ defmodule Agentix.Agent do
   end
 
   defp launch_turn(scope, data, from) do
-    turn = %{
+    data = %{data | turn: base_turn(scope)}
+    Publisher.turn_started(data.publisher, data.turn.ref)
+    Publisher.state_changed(data.publisher, :preparing)
+
+    reply = if from, do: [{:reply, from, :ok}], else: []
+    {:next_state, :preparing, data, reply ++ [{:next_event, :internal, :assemble}]}
+  end
+
+  # A fresh turn's in-memory state. `ref` keys this turn's tool tasks/events; `calls` and
+  # `task_index` track in-flight tool calls. (`continue_turn/1` keeps the same `ref` for a
+  # tool loop; `revive_awaiting/2` rebuilds this with a restored `calls` map.)
+  defp base_turn(scope) do
+    %{
       ref: make_ref(),
       msg_id: new_msg_id(),
       scope: scope,
@@ -413,13 +425,6 @@ defmodule Agentix.Agent do
       # monitor_ref => tool_call_id, for O(1) crashed-task lookup on :DOWN
       task_index: %{}
     }
-
-    data = %{data | turn: turn}
-    Publisher.turn_started(data.publisher, turn.ref)
-    Publisher.state_changed(data.publisher, :preparing)
-
-    reply = if from, do: [{:reply, from, :ok}], else: []
-    {:next_state, :preparing, data, reply ++ [{:next_event, :internal, :assemble}]}
   end
 
   # Spawn the monitored streaming task over the (post-injection) context and move to
@@ -1237,9 +1242,66 @@ defmodule Agentix.Agent do
 
   ## Recovery
 
+  # Decide the initial state on (re)start. A conversation killed while suspended on a
+  # tool call (HITL) must come back in `:awaiting_input` with its in-memory `calls` map
+  # rebuilt from the durable records, so a post-kill `Agentix.resolve/4` is accepted
+  # rather than returning `{:error, :stale}`. Otherwise fall back to log-tail recovery.
+  defp revive(data, events) do
+    case Persistence.pending_tool_calls(data.conversation_id) do
+      [] ->
+        {state, actions} = recover(events)
+        {state, data, actions}
+
+      pending ->
+        revive_awaiting(data, pending)
+    end
+  end
+
+  # Rebuild the suspended turn: a `calls` entry per still-pending tool call, with the
+  # `phase` restored so `handle_resolve/6` accepts the resolution. The pending records are
+  # authoritative for *which* calls are open + their args; the `fsm_state.pending` cache
+  # supplies each call's display name and `kind` (→ phase).
+  defp revive_awaiting(data, pending) do
+    cached = fsm_pending(data.conversation_id)
+
+    calls =
+      Map.new(pending, fn call ->
+        meta = Map.get(cached, call.id, %{})
+        name = meta[:name] || Map.get(call, :name)
+        phase = revive_phase(data.config, name, meta, call)
+        {call.id, call_entry(find_tool(data.config, name), name, call.args, phase)}
+      end)
+
+    {:awaiting_input, %{data | turn: %{base_turn(Scope.system()) | calls: calls}}, []}
+  end
+
+  defp fsm_pending(conversation_id) do
+    case Persistence.get_conversation(conversation_id) do
+      %{fsm_state: %{pending: pending}} when is_map(pending) -> pending
+      _ -> %{}
+    end
+  end
+
+  # Prefer the live tool definition (covers gated re-dispatch); else the cached `kind`;
+  # else the executor's default suspension phase.
+  defp revive_phase(config, name, meta, call) do
+    cond do
+      tool = find_tool(config, name) -> suspend_phase(tool)
+      meta[:kind] -> kind_to_phase(meta[:kind])
+      true -> executor_phase(call.executor)
+    end
+  end
+
+  defp kind_to_phase(:approval), do: :awaiting_approval
+  defp kind_to_phase(:client_exec), do: :awaiting_exec
+  defp kind_to_phase(_elicitation), do: :awaiting_human
+
+  defp executor_phase(:client), do: :awaiting_exec
+  defp executor_phase(_executor), do: :awaiting_human
+
   # A log ending in a `:user_msg` was killed after recording the message but before
   # the assistant reply — re-run the turn under the system scope. Any other tail is
-  # already resolved (dangling tool-call revival is handled by the durable adapter).
+  # already resolved.
   defp recover([]), do: {:idle, []}
 
   defp recover(events) do

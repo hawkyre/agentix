@@ -51,6 +51,7 @@ defmodule Agentix.ConversationTest do
   alias Agentix.Persistence
   alias Agentix.Scope
   alias Agentix.Test.MockProvider
+  alias Agentix.Tool
   alias ReqLLM.Message
 
   setup do
@@ -243,6 +244,37 @@ defmodule Agentix.ConversationTest do
       # Without resuming the counter the second turn would reuse turn_ref 1 and clobber
       # the first audit row; it must continue at 2.
       assert [1, 2] == id |> Persistence.model_calls() |> Enum.map(& &1.turn_ref)
+    end
+
+    test "a conversation killed while suspended on a human tool revives and resolves",
+         %{id: id} do
+      ask = Tool.new(name: "ask", executor: :human)
+
+      MockProvider.script([
+        completion("", tool_calls: [{"ask", %{"prompt" => "name?"}}]),
+        completion("Hi Bob")
+      ])
+
+      {:ok, pid} = Conversation.ensure_started(id, config: config(tools: [ask]))
+      :ok = Conversation.send_message(id, "greet", Scope.new())
+      assert_receive {:suspended, tool_call_id, :human, _prompt}
+
+      # Kill mid-suspension. The durable tool-call record + fsm_state survive; the
+      # transient supervisor revives a fresh process that must come back in
+      # `awaiting_input` with the pending call rehydrated (not `:idle`).
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}
+
+      wait_until(fn ->
+        match?([{new_pid, _}] when new_pid != pid, Registry.lookup(Agentix.Registry, id))
+      end)
+
+      # The late resolution reaches the revived agent (not `{:error, :stale}`) and the
+      # turn runs to completion — the durable-suspension guarantee.
+      assert :ok = Agentix.resolve(id, tool_call_id, "Bob")
+      assert_receive {:turn_completed, _ref}
+      assert assistant_text(id) == "Hi Bob"
     end
   end
 

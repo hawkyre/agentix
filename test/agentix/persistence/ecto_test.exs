@@ -7,9 +7,7 @@ defmodule Agentix.Persistence.EctoTest do
   conversation ids for isolation, and the Oban expiry worker runs in its own process, so
   it must see committed rows.
   """
-  use Agentix.PersistenceConformance, adapter: Agentix.Persistence.Ecto
-
-  @moduletag :postgres
+  use Agentix.PersistenceConformance, adapter: Agentix.Persistence.Ecto, moduletag: :postgres
 
   @default_url "postgres://postgres:postgres@127.0.0.1:5433/agentix_test"
 

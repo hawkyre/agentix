@@ -20,10 +20,21 @@ defmodule Agentix.PersistenceConformance do
   # tests must be injected into the using module. The check does not apply here.
   # credo:disable-for-this-file Credo.Check.Refactor.LongQuoteBlocks
   defmacro __using__(opts) do
+    # `@moduletag` must be set *before* the test macros below run (ExUnit captures a test's
+    # tags at definition time), so the caller passes it through the macro rather than after
+    # `use` — e.g. `use Agentix.PersistenceConformance, adapter: …, moduletag: :postgres`.
+    moduletag_ast =
+      case Keyword.get(opts, :moduletag) do
+        nil -> nil
+        tag -> quote(do: @moduletag(unquote(tag)))
+      end
+
     quote location: :keep do
       use ExUnit.Case, async: false
 
       alias Agentix.Event
+
+      unquote(moduletag_ast)
 
       @adapter unquote(Keyword.fetch!(opts, :adapter))
 
