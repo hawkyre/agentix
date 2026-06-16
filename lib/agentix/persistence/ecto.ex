@@ -25,14 +25,11 @@ if Code.ensure_loaded?(Ecto) do
     ## Expiry
 
     `schedule_expiry/3` / `cancel_expiry/2` are backed by Oban, so a scheduled expiry lives
-    in the database and survives the agent being killed (a per-agent timer would not). Oban
-    is an **optional dependency of this adapter only**; every Oban reference is guarded, and
-    calling these without `:oban` raises.
-
-    > Note: the agent currently arms suspension timeouts with an in-process timer
-    > (`Agentix.Agent`); delegating that lifecycle to `schedule_expiry/3` so a *revived*
-    > agent's pending calls keep their timeout is a separate integration (see the Inc 11
-    > carry-forward in `.plans/`).
+    in the database and survives the agent being killed (a per-agent timer would not). The
+    agent arms one on every suspension alongside its in-process timer and cancels it on
+    resolution, so a pending HITL call still expires after a crash. Oban is an **optional
+    dependency of this adapter only**; if it is absent, durable expiry degrades to a no-op
+    (with a one-time warning) and the in-process timeout still applies.
     """
 
     @behaviour Agentix.Persistence
@@ -266,32 +263,34 @@ if Code.ensure_loaded?(Ecto) do
 
     @impl true
     def schedule_expiry(conversation_id, tool_call_id, timeout_ms) do
-      ensure_oban!()
-
-      # `replace: [scheduled: [:scheduled_at]]` makes a reschedule of the same call move
-      # the existing job's fire time rather than leaking a second timer.
-      %{conversation_id: conversation_id, tool_call_id: tool_call_id}
-      |> ExpiryWorker.new(
-        scheduled_at: DateTime.add(DateTime.utc_now(), timeout_ms, :millisecond),
-        replace: [scheduled: [:scheduled_at]]
-      )
-      |> Oban.insert!()
+      if oban_available?() do
+        # `replace: [scheduled: [:scheduled_at]]` makes a reschedule of the same call move
+        # the existing job's fire time rather than leaking a second timer.
+        %{conversation_id: conversation_id, tool_call_id: tool_call_id}
+        |> ExpiryWorker.new(
+          scheduled_at: DateTime.add(DateTime.utc_now(), timeout_ms, :millisecond),
+          replace: [scheduled: [:scheduled_at]]
+        )
+        |> Oban.insert!()
+      else
+        warn_no_oban()
+      end
 
       :ok
     end
 
     @impl true
     def cancel_expiry(conversation_id, tool_call_id) do
-      ensure_oban!()
-
-      Oban.cancel_all_jobs(
-        from(j in Oban.Job,
-          where:
-            j.worker == "Agentix.Persistence.Ecto.ExpiryWorker" and
-              fragment("?->>'tool_call_id' = ?", j.args, ^tool_call_id) and
-              fragment("?->>'conversation_id' = ?", j.args, ^conversation_id)
+      if oban_available?() do
+        Oban.cancel_all_jobs(
+          from(j in Oban.Job,
+            where:
+              j.worker == "Agentix.Persistence.Ecto.ExpiryWorker" and
+                fragment("?->>'tool_call_id' = ?", j.args, ^tool_call_id) and
+                fragment("?->>'conversation_id' = ?", j.args, ^conversation_id)
+          )
         )
-      )
+      end
 
       :ok
     end
@@ -462,10 +461,20 @@ if Code.ensure_loaded?(Ecto) do
 
     defp audit_enabled?, do: Application.get_env(:agentix, :audit, false)
 
-    defp ensure_oban! do
-      if !Code.ensure_loaded?(Oban) do
-        raise "Agentix.Persistence.Ecto suspension expiry needs Oban — add {:oban, \"~> 2.20\"} " <>
-                "and start it under your supervision tree."
+    defp oban_available?, do: Code.ensure_loaded?(Oban)
+
+    # Durable expiry is a no-op without Oban (the agent's in-process timeout still applies).
+    # Warn once rather than per-suspend so a host that opted out of Oban isn't spammed.
+    defp warn_no_oban do
+      if !:persistent_term.get({__MODULE__, :warned_no_oban}, false) do
+        require Logger
+
+        :persistent_term.put({__MODULE__, :warned_no_oban}, true)
+
+        Logger.warning(
+          "Agentix.Persistence.Ecto: :oban is not loaded — durable suspension expiry is " <>
+            "disabled (in-process timeout only). Add {:oban, \"~> 2.20\"} to enable it."
+        )
       end
     end
   end

@@ -8,6 +8,7 @@ defmodule Agentix.Persistence.EctoRevivalTest do
   use ExUnit.Case, async: false
 
   import Agentix.Test
+  import Ecto.Query, only: [from: 2]
 
   alias Agentix.Conversation
   alias Agentix.Conversation.Config
@@ -16,6 +17,7 @@ defmodule Agentix.Persistence.EctoRevivalTest do
   alias Agentix.Scope
   alias Agentix.Test.EctoCase
   alias Agentix.Test.MockProvider
+  alias Agentix.Test.Repo
   alias Agentix.Tool
 
   @moduletag :postgres
@@ -69,5 +71,39 @@ defmodule Agentix.Persistence.EctoRevivalTest do
     assert :ok = Agentix.resolve(id, tool_call_id, "Bob")
     assert_receive {:turn_completed, _ref}
     assert Persistence.get_tool_call(tool_call_id).status == :resolved
+  end
+
+  test "suspending arms a durable Oban expiry job; resolving cancels it", %{id: id} do
+    ask = Tool.new(name: "ask", executor: :human)
+
+    MockProvider.script([
+      completion("", tool_calls: [{"ask", %{"prompt" => "name?"}}]),
+      completion("Hi Bob")
+    ])
+
+    {:ok, _pid} = Conversation.ensure_started(id, config: config(tools: [ask]))
+    :ok = Conversation.send_message(id, "greet", Scope.new())
+    assert_receive {:suspended, tool_call_id, :human, _prompt}
+
+    # The agent armed a durable expiry job alongside its in-process timer — this is what
+    # survives a kill. (Polled: the job is inserted a few synchronous lines after the
+    # `:suspended` broadcast the test just received.)
+    wait_until(fn -> pending_expiry_job?(tool_call_id) end)
+
+    # Resolving cancels the durable job (no stray expiry fires later).
+    assert :ok = Agentix.resolve(id, tool_call_id, "Bob")
+    assert_receive {:turn_completed, _ref}
+    wait_until(fn -> not pending_expiry_job?(tool_call_id) end)
+  end
+
+  defp pending_expiry_job?(tool_call_id) do
+    Repo.exists?(
+      from(j in Oban.Job,
+        where:
+          j.worker == "Agentix.Persistence.Ecto.ExpiryWorker" and
+            fragment("?->>'tool_call_id' = ?", j.args, ^tool_call_id) and
+            j.state in ["scheduled", "available", "executing"]
+      )
+    )
   end
 end

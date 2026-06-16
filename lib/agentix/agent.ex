@@ -29,8 +29,19 @@ defmodule Agentix.Agent do
 
   The append-only event log (`Agentix.Persistence`) is the source of truth; the
   agent rebuilds its working context from the log every turn and re-reads the max
-  `seq` on revival. On `ensure_started` a log ending in a dangling `:user_msg`
-  (killed mid-stream, nothing dispatched) is **re-run** — no side effects happened.
+  `seq` on revival. On `ensure_started`, `revive/2` reconciles the kill boundary:
+
+    * a conversation suspended on a HITL tool comes back in `:awaiting_input` with its
+      `calls` map rebuilt from the durable records, re-arming the timeout, so a post-kill
+      `Agentix.resolve/4` is accepted (not `{:error, :stale}`);
+    * a dangling `:tool_call` (no paired `:tool_result` — an auto-server tool killed
+      mid-run, or one a durable expiry resolved while dead) is paired with the durable
+      result if any, else an interrupted error (the tool is **not** re-executed);
+    * a log ending in a dangling `:user_msg` (killed before any dispatch) is **re-run**.
+
+  Suspension timeouts are armed twice — an in-process timer (drives the live agent) and a
+  durable adapter-backed one (`schedule_expiry/3`, survives a kill); whichever fires first
+  records the result, the other is a stale no-op.
   """
 
   @behaviour :gen_statem
@@ -687,7 +698,11 @@ defmodule Agentix.Agent do
 
     Publisher.tool_call_started(data.publisher, id, name, tool.executor, args)
     Publisher.suspended(data.publisher, id, tool.executor, %{kind: kind, args: args})
+    # Two timers: the in-process one drives this live agent; the durable one (adapter-owned)
+    # is the backstop that fires even if the agent is killed (see `do_record_result/3` and
+    # `revive_awaiting/2`). Both are cancelled on any terminal outcome.
     timer = arm_timeout(data, id)
+    Persistence.schedule_expiry(data.conversation_id, id, data.config.default_timeout)
     update_call(data, id, call_entry(tool, name, args, phase, timer: timer))
   end
 
@@ -726,6 +741,7 @@ defmodule Agentix.Agent do
     # the callback as the approver.
     call = current_call(data, id)
     cancel_timer(call.timer)
+    Persistence.cancel_expiry(data.conversation_id, id)
     Persistence.resolve_tool_call(id, :resolved, %{approved: true})
     Publisher.tool_call_started(data.publisher, id, call.name, :server, call.args)
     task = Dispatch.run_server(self(), data.turn.ref, id, tool, call.args, build_turn(data, scope))
@@ -749,6 +765,8 @@ defmodule Agentix.Agent do
   defp do_record_result(data, id, result) do
     call = current_call(data, id)
     cancel_timer(call.timer)
+    # A `timer` means this call was suspended, so it also has a durable expiry to cancel.
+    if call.timer, do: Persistence.cancel_expiry(data.conversation_id, id)
     # Release the server task's monitor (flushing its now-irrelevant normal `:DOWN`)
     # so it never reaches `tool_task_down`, and drop it from the crash index.
     data = release_task(data, call)
@@ -1254,11 +1272,64 @@ defmodule Agentix.Agent do
   defp revive(data, events) do
     case Persistence.pending_tool_calls(data.conversation_id) do
       [] ->
-        {state, actions} = recover(events)
-        {state, data, actions}
+        reconcile_dangling(data, events)
 
       pending ->
         revive_awaiting(data, pending)
+    end
+  end
+
+  # A `:tool_call` event with no paired `:tool_result` is dangling: an auto-server tool
+  # killed mid-run, or a HITL call the durable expiry resolved while the agent was dead.
+  # Providers reject orphan tool calls, so restore the pairing before anything else —
+  # then fall through to ordinary tail recovery. We do NOT re-execute a side-effecting
+  # tool (that needs an idempotency contract Agentix doesn't model yet); we record the
+  # durable terminal result if one exists, else an interrupted error the model can retry.
+  defp reconcile_dangling(data, events) do
+    case dangling_tool_calls(events) do
+      [] ->
+        {state, actions} = recover(events)
+        {state, data, actions}
+
+      dangling ->
+        data = Enum.reduce(dangling, data, &reconcile_one/2)
+        {:idle, data, []}
+    end
+  end
+
+  defp dangling_tool_calls(events) do
+    resulted =
+      for %Event{type: :tool_result, content: c} <- events,
+          into: MapSet.new(),
+          do: c["tool_call_id"] || c[:tool_call_id]
+
+    for %Event{type: :tool_call, content: c} <- events,
+        id = c["tool_call_id"] || c[:tool_call_id],
+        not MapSet.member?(resulted, id),
+        do: {id, c["name"] || c[:name]}
+  end
+
+  defp reconcile_one({id, name}, data) do
+    {:ok, seq} =
+      append_event(data, :tool_result, %{
+        "tool_call_id" => id,
+        "name" => name,
+        "result" => reconciled_result(id)
+      })
+
+    %{data | last_seq: seq}
+  end
+
+  # Prefer a durable terminal result (e.g. the durable expiry already resolved it);
+  # otherwise the call was interrupted mid-run.
+  defp reconciled_result(id) do
+    case Persistence.get_tool_call(id) do
+      %{status: status, result: result}
+      when status in [:resolved, :errored, :expired] and not is_nil(result) ->
+        result
+
+      _ ->
+        %{ok: false, error: "tool call interrupted: agent restarted before it completed"}
     end
   end
 
@@ -1268,6 +1339,8 @@ defmodule Agentix.Agent do
   # supplies each call's display name and `kind` (→ phase).
   defp revive_awaiting(data, pending) do
     cached = fsm_pending(data.conversation_id)
+    # Set the turn first so `arm_timeout/2` can key the re-armed timer on its `ref`.
+    data = %{data | turn: base_turn(Scope.system())}
 
     calls =
       Map.new(pending, fn call ->
@@ -1275,10 +1348,13 @@ defmodule Agentix.Agent do
         # The durable record is authoritative; the fsm_state cache is the fallback.
         name = Map.get(call, :name) || meta[:name]
         phase = revive_phase(data.config, name, meta, call)
-        {call.id, call_entry(find_tool(data.config, name), name, call.args, phase)}
+        # Re-arm the in-process timeout (the durable backstop from the original suspend is
+        # still scheduled); without this a revived suspended call would never time out.
+        timer = arm_timeout(data, call.id)
+        {call.id, call_entry(find_tool(data.config, name), name, call.args, phase, timer: timer)}
       end)
 
-    {:awaiting_input, %{data | turn: %{base_turn(Scope.system()) | calls: calls}}, []}
+    {:awaiting_input, %{data | turn: %{data.turn | calls: calls}}, []}
   end
 
   defp fsm_pending(conversation_id) do

@@ -246,6 +246,34 @@ defmodule Agentix.ConversationTest do
       assert [1, 2] == id |> Persistence.model_calls() |> Enum.map(& &1.turn_ref)
     end
 
+    test "a dangling tool_call (auto-server killed mid-run) is reconciled on revival",
+         %{id: id} do
+      # Seed a log with a :tool_call that has no paired :tool_result — as if an auto-server
+      # tool was running when the agent was killed (such calls aren't persisted as pending).
+      {:ok, _} =
+        Persistence.append_event(
+          id,
+          Agentix.Event.new(:tool_call, %{
+            "tool_call_id" => "call_x",
+            "name" => "weather",
+            "args" => %{}
+          })
+        )
+
+      {:ok, _pid} = Conversation.ensure_started(id, config: config())
+
+      # Revival pairs the dangling call with an interrupted-error result (it does NOT
+      # re-execute the tool) so the log is valid for the next turn.
+      result =
+        id
+        |> Persistence.stream_events()
+        |> Enum.find(&(&1.type == :tool_result and &1.content["tool_call_id"] == "call_x"))
+
+      assert result
+      assert result.content["result"].ok == false
+      assert result.content["result"].error =~ "interrupted"
+    end
+
     test "a conversation killed while suspended on a human tool revives and resolves",
          %{id: id} do
       ask = Tool.new(name: "ask", executor: :human)
