@@ -48,6 +48,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
             send_message: 2,
             send_message: 3,
             resolve: 3,
+            resolve: 4,
             cancel: 1,
             load_older: 1
           ]
@@ -108,13 +109,15 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
 
     @doc """
     Resolves a pending tool call — an approval (`:approve` / `%{approved: bool}`) or an
-    elicitation answer. Pass `:scope` in a 4-arity `Agentix.resolve/4` call directly for
-    a non-default resolver identity.
+    elicitation answer. Pass `:scope` (an `Agentix.Scope`) in `opts` to attribute the
+    resolution to the acting user; it is threaded into a gated `:server` tool's callback as
+    the approver. Mirrors `send_message/3`; defaults to an anonymous scope.
     """
-    @spec resolve(Socket.t(), String.t(), term()) ::
+    @spec resolve(Socket.t(), String.t(), term(), keyword()) ::
             Socket.t()
-    def resolve(socket, tool_call_id, result) do
-      Agentix.resolve(conversation_id(socket), tool_call_id, result, Scope.new())
+    def resolve(socket, tool_call_id, result, opts \\ []) do
+      scope = Keyword.get(opts, :scope, Scope.new())
+      Agentix.resolve(conversation_id(socket), tool_call_id, result, scope)
       socket
     end
 

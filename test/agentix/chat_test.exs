@@ -214,6 +214,36 @@ defmodule Agentix.ChatTest do
     end
   end
 
+  describe "resolve/4 — caller scope" do
+    test "threads the approver's scope into a gated :server tool callback", ctx do
+      test_pid = self()
+
+      tool =
+        Tool.new(
+          name: "thing",
+          executor: :server,
+          approval: :requires_approval,
+          callback: fn _args, turn ->
+            send(test_pid, {:approver, turn.scope})
+            {:ok, "ok"}
+          end
+        )
+
+      start_conversation(ctx.id, tools: [tool])
+      MockProvider.script([completion("", tool_calls: [{"thing", %{}}]), completion("done")])
+
+      {:ok, live, _html} = mount_chat(ctx.conn, ctx.id)
+      live |> form("#composer", %{"text" => "go"}) |> render_submit()
+
+      assert_receive {:suspended, tool_call_id, _executor, _prompt}
+      render_hook(live, "approve_as", %{"id" => tool_call_id, "user" => "u-42"})
+
+      # The default `resolve/3` would have sent an anonymous `Scope.new()`; the `:scope`
+      # opt must reach the callback as the approver's identity.
+      assert_receive {:approver, %Scope{current_user: "u-42", system?: false}}
+    end
+  end
+
   describe "dom_id/1 — stream keying contract" do
     alias Agentix.Chat.Projection
     alias ReqLLM.Message

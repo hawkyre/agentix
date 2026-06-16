@@ -6,6 +6,8 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     use Phoenix.LiveView
     use Agentix.Chat
 
+    alias Agentix.Scope
+
     @impl Phoenix.LiveView
     def mount(_params, %{"conversation_id" => id} = session, socket) do
       opts = if size = session["page_size"], do: [page_size: size], else: []
@@ -58,6 +60,11 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
 
     def handle_event("approve", %{"id" => id}, socket) do
       {:noreply, resolve(socket, id, :approve)}
+    end
+
+    # Exercises `resolve/4`'s `:scope` opt — attributes the approval to a user.
+    def handle_event("approve_as", %{"id" => id, "user" => user}, socket) do
+      {:noreply, resolve(socket, id, :approve, scope: Scope.new(current_user: user))}
     end
 
     def handle_event("cancel", _params, socket) do
