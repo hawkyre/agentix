@@ -115,6 +115,51 @@ defmodule Agentix.ComponentsTest do
     end
   end
 
+  describe "message/1 — markdown rendering" do
+    test "by default an identified message carries the AgentixMarkdown hook + raw text" do
+      assigns = %{message: %Message{role: :assistant, content: [ContentPart.text("see **42**")]}}
+
+      html =
+        rendered_to_string(~H"""
+        <Agentix.Components.message id="m1" message={@message} />
+        """)
+
+      # The hook renders the markdown client-side; the raw text rides in `data-md` (for the
+      # hook) and stays in the body (so SSR / no-JS still shows readable text).
+      assert html =~ ~s(phx-hook="AgentixMarkdown")
+      assert html =~ ~s(data-md="see **42**")
+      assert html =~ "see **42**"
+    end
+
+    test "render_markdown: false opts out to plain text — no hook, raw text in the body" do
+      Application.put_env(:agentix, :render_markdown, false)
+      on_exit(fn -> Application.delete_env(:agentix, :render_markdown) end)
+
+      assigns = %{message: %Message{role: :assistant, content: [ContentPart.text("see **42**")]}}
+
+      html =
+        rendered_to_string(~H"""
+        <Agentix.Components.message id="m1" message={@message} />
+        """)
+
+      refute html =~ "AgentixMarkdown"
+      refute html =~ "data-md"
+      assert html =~ "whitespace-pre-wrap"
+      assert html =~ "see **42**"
+    end
+
+    test "the streaming text node opts into markdown by default" do
+      assigns = %{message: %{id: "s1"}}
+
+      html =
+        rendered_to_string(~H"""
+        <Agentix.Components.streaming_message message={@message} />
+        """)
+
+      assert html =~ ~s(data-agentix="text" data-markdown="true")
+    end
+  end
+
   describe "mix agentix.gen.components" do
     test "copies a component module that compiles" do
       dir = Path.join(System.tmp_dir!(), "agentix-gen-#{System.unique_integer([:positive])}")
