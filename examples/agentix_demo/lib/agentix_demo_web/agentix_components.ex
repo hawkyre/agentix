@@ -130,10 +130,11 @@ defmodule AgentixDemoWeb.AgentixComponents do
         <.role_header role={@message.role} />
         <div
           :if={@bubble == [] and message_text(@message) != ""}
+          id={@id && @id <> "-text"}
+          phx-hook={markdown_hook(@id)}
+          data-md={markdown_hook(@id) && message_text(@message)}
           class="whitespace-pre-wrap text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200"
-        >
-          {message_text(@message)}
-        </div>
+        >{message_text(@message)}</div>
         {render_slot(@bubble, @message)}
       </div>
     </div>
@@ -150,7 +151,7 @@ defmodule AgentixDemoWeb.AgentixComponents do
       phx-hook="AgentixStream"
       phx-update="ignore"
       data-msg-id={@message.id}
-    ><div data-agentix="thinking" hidden class="mb-3 whitespace-pre-wrap text-[13px] leading-relaxed text-neutral-500 dark:text-neutral-400"></div><div data-agentix="text" class="caret whitespace-pre-wrap text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200"></div></div>
+    ><div data-agentix="thinking" hidden class="mb-3 whitespace-pre-wrap text-[13px] leading-relaxed text-neutral-500 dark:text-neutral-400"></div><div data-agentix="text" data-markdown={to_string(markdown?())} class="caret whitespace-pre-wrap text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200"></div></div>
     """
   end
 
@@ -460,6 +461,17 @@ defmodule AgentixDemoWeb.AgentixComponents do
     do: parts |> Enum.map(&Map.get(&1, :text)) |> Enum.reject(&is_nil/1) |> Enum.join("")
 
   defp message_text(_message), do: ""
+
+  # Markdown rendering is on by default; a host opts out with
+  # `config :agentix, render_markdown: false`. The markdown engine is the host's (wired
+  # into the JS hook via `configureMarkdown/1`) — see `agentix_stream_hook.js`.
+  defp markdown?, do: Application.get_env(:agentix, :render_markdown, true)
+
+  defp markdown_hook(id) when is_binary(id) do
+    if markdown?(), do: "AgentixMarkdown"
+  end
+
+  defp markdown_hook(_id), do: nil
 
   # Turn grouping: user messages are their own group; assistant and tool messages share
   # the "agent" group so a turn's text + tool rows collapse under one header.

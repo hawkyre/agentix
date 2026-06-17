@@ -119,6 +119,8 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/agentix_demo_test
         run: |
           mix deps.get
+          mix assets.setup
+          mix assets.build
           mix agentix.gen.components lib/agentix_demo_web --module AgentixDemoWeb.AgentixComponents --force
           mix ecto.create
           mix ecto.migrate

@@ -27,3 +27,6 @@ agentix-*.tar
 
 # Design docs (local only)
 .docs/
+
+# Example built asset bundles (vendored sources under assets/vendor ARE committed)
+/examples/*/priv/static/assets/

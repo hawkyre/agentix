@@ -21,4 +21,14 @@ config :agentix_demo, Oban,
   repo: AgentixDemo.Repo,
   queues: [agentix_expiry: 10]
 
+# esbuild bundles assets/js/app.js → priv/static/assets/app.js. `NODE_PATH` points at deps so
+# `import "phoenix"` / "phoenix_live_view" / "agentix/..." resolve without npm/node_modules.
+config :esbuild,
+  version: "0.28.1",
+  agentix_demo: [
+    args: ~w(js/app.js --bundle --target=es2020 --outdir=../priv/static/assets),
+    cd: Path.expand("../assets", __DIR__),
+    env: %{"NODE_PATH" => Path.expand("../deps", __DIR__)}
+  ]
+
 import_config "#{config_env()}.exs"

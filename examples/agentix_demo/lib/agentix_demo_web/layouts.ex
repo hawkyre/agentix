@@ -22,19 +22,7 @@ defmodule AgentixDemoWeb.Layouts do
           // the demo renders consistently light. (Add a toggle that flips `.dark` for dark mode.)
           tailwind.config = {darkMode: "class"}
         </script>
-        <script type="importmap">
-          {"imports": {
-            "phoenix": "/assets/phoenix.mjs",
-            "phoenix_live_view": "/assets/phoenix_live_view.esm.js"
-          }}
-        </script>
-        <script type="module">
-          import {Socket} from "phoenix"
-          import {LiveSocket} from "phoenix_live_view"
-          import {AgentixStream, AgentixComposer} from "/assets/agentix_stream_hook.js"
-          const csrf = document.querySelector("meta[name='csrf-token']").getAttribute("content")
-          const liveSocket = new LiveSocket("/live", Socket, {params: {_csrf_token: csrf}, hooks: {AgentixStream, AgentixComposer}})
-          liveSocket.connect()
+        <script defer src="/assets/app.js">
         </script>
         {Phoenix.HTML.raw("<style>" <> AgentixDemoWeb.AgentixComponents.css() <> "</style>")}
       </head>

@@ -39,6 +39,9 @@ defmodule AgentixDemo.MixProject do
       {:oban, "~> 2.20"},
       {:jason, "~> 1.4"},
       {:bandit, "~> 1.0"},
+      # Bundles app.js (Phoenix + LiveView + the Agentix hooks + marked/DOMPurify) — a
+      # standalone binary, no Node. See config/config.exs and assets/.
+      {:esbuild, "~> 0.8", runtime: Mix.env() == :dev},
       # `Phoenix.LiveViewTest` parses rendered markup through LazyHTML.
       {:lazy_html, "~> 0.1", only: :test}
     ]
@@ -49,7 +52,9 @@ defmodule AgentixDemo.MixProject do
     # in — it was produced once with `mix agentix.gen.migration`. `setup` just creates and
     # migrates the DB; `test` ensures the schema is present before the suite runs.
     [
-      setup: ["deps.get", "ecto.create", "ecto.migrate"],
+      setup: ["deps.get", "assets.setup", "assets.build", "ecto.create", "ecto.migrate"],
+      "assets.setup": ["esbuild.install --if-missing"],
+      "assets.build": ["esbuild agentix_demo"],
       test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"]
     ]
   end

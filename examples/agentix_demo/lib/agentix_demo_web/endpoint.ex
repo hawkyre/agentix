@@ -10,7 +10,8 @@ defmodule AgentixDemoWeb.Endpoint do
 
   socket("/live", Phoenix.LiveView.Socket, websocket: [connect_info: [session: @session_options]])
 
-  plug(AgentixDemoWeb.Assets)
+  # Serve the esbuild bundle (app.js) from priv/static/assets.
+  plug(Plug.Static, at: "/assets", from: {:agentix_demo, "priv/static/assets"}, gzip: false)
   plug(Plug.Session, @session_options)
   plug(AgentixDemoWeb.Router)
 end
