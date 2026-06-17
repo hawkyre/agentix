@@ -131,7 +131,7 @@ if Code.ensure_loaded?(Phoenix.Component) do
           <.role_header role={@message.role} />
           <div
             :if={@bubble == [] and message_text(@message) != ""}
-            class="text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200"
+            class="whitespace-pre-wrap text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200"
           >
             {message_text(@message)}
           </div>
