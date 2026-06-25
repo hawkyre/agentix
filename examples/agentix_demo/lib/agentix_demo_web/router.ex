@@ -18,5 +18,6 @@ defmodule AgentixDemoWeb.Router do
     # same conversation (its history is reloaded from Postgres on mount).
     live("/", ChatLive, :new)
     live("/c/:id", ChatLive, :show)
+    live("/gallery", GalleryLive)
   end
 end
