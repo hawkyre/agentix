@@ -6,6 +6,7 @@ import {
   AgentixStream,
   AgentixComposer,
   AgentixMarkdown,
+  AgentixAutoScroll,
   configureMarkdown,
   // In-repo demo: Agentix is a `path:` dep, so its hook lives at the repo root. An external
   // host (agentix as a hex/git dep) would import from "../../deps/agentix/priv/static/…".
@@ -34,7 +35,7 @@ const Theme = {
 
 const liveSocket = new LiveSocket("/live", Socket, {
   params: { _csrf_token: csrfToken },
-  hooks: { AgentixStream, AgentixComposer, AgentixMarkdown, Theme },
+  hooks: { AgentixStream, AgentixComposer, AgentixMarkdown, AgentixAutoScroll, Theme },
 })
 
 liveSocket.connect()

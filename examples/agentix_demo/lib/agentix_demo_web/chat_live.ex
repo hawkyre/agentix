@@ -55,7 +55,7 @@ defmodule AgentixDemoWeb.ChatLive do
         </button>
       </div>
 
-      <div class="flex-1">
+      <div id="agentix-scroll" phx-hook="AgentixAutoScroll" class="flex-1">
         <.message_list
           messages={@streams.messages}
           streaming_message={@streaming_message}

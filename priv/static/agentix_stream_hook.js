@@ -143,6 +143,8 @@ export const AgentixComposer = {
       }
     })
     this.el.form?.addEventListener("submit", () => {
+      // Sending a message always returns the view to the bottom (see AgentixAutoScroll).
+      window.dispatchEvent(new CustomEvent("agentix:user-sent"))
       requestAnimationFrame(() => {
         this.el.value = ""
         this.resize()
@@ -153,6 +155,78 @@ export const AgentixComposer = {
   resize() {
     this.el.style.height = "auto"
     this.el.style.height = Math.min(this.el.scrollHeight, 160) + "px"
+  },
+}
+
+// Keeps the conversation pinned to the bottom as content streams in — but only while the user
+// is already at (or near) the bottom. If they scroll up to read, new messages and streamed
+// tokens don't yank them back down; scrolling back to the bottom re-arms the stick, and sending
+// a message always returns there.
+//
+// Attach to the element that WRAPS the message thread *and* the streaming node (so it sees both
+// stream inserts and the in-progress text growing). It scrolls the nearest scrollable ancestor,
+// or the window if there is none:
+//
+//   <div id="agentix-scroll" phx-hook="AgentixAutoScroll">
+//     <.message_list ... />
+//   </div>
+export const AgentixAutoScroll = {
+  mounted() {
+    this.threshold = 80 // px from the bottom that still counts as "at the bottom"
+    this.stick = true
+    this.scroller = this.scrollAncestor()
+
+    this.onScroll = () => {
+      this.stick = this.atBottom()
+    }
+    this.scrollTarget().addEventListener("scroll", this.onScroll, { passive: true })
+
+    // New content arrives two ways: stream inserts (childList) and the streaming node's text
+    // growing (its innerHTML is replaced each frame) — both are caught here.
+    this.observer = new MutationObserver(() => {
+      if (this.stick) this.toBottom()
+    })
+    this.observer.observe(this.el, { childList: true, subtree: true, characterData: true })
+
+    this.onSent = () => {
+      this.stick = true
+      this.toBottom()
+    }
+    window.addEventListener("agentix:user-sent", this.onSent)
+
+    this.toBottom()
+  },
+
+  destroyed() {
+    this.scrollTarget().removeEventListener("scroll", this.onScroll)
+    window.removeEventListener("agentix:user-sent", this.onSent)
+    this.observer?.disconnect()
+  },
+
+  scrollAncestor() {
+    let n = this.el.parentElement
+    while (n) {
+      const oy = getComputedStyle(n).overflowY
+      if (oy === "auto" || oy === "scroll") return n
+      n = n.parentElement
+    }
+    return null
+  },
+
+  scrollTarget() {
+    return this.scroller || window
+  },
+
+  atBottom() {
+    if (this.scroller) {
+      return this.scroller.scrollHeight - this.scroller.scrollTop - this.scroller.clientHeight <= this.threshold
+    }
+    return document.documentElement.scrollHeight - window.scrollY - window.innerHeight <= this.threshold
+  },
+
+  toBottom() {
+    if (this.scroller) this.scroller.scrollTop = this.scroller.scrollHeight
+    else window.scrollTo(0, document.documentElement.scrollHeight)
   },
 }
 
