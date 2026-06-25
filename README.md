@@ -3,7 +3,7 @@
 A LiveView-native library for building agentic systems in Elixir, built on
 [ReqLLM](https://hexdocs.pm/req_llm).
 
-> **Status:** v0.1.0. The runtime is implemented — the agent loop, tools/HITL,
+> **Status:** v0.2.0. The runtime is implemented — the agent loop, tools/HITL,
 > the hook pipeline, reducer-based compaction, the headless LiveView layer, and
 > ETS + Ecto/Postgres persistence — with two runnable example apps under
 > `examples/`. This is a `0.x` release: the public API is documented and stable,
@@ -12,7 +12,8 @@ A LiveView-native library for building agentic systems in Elixir, built on
 Agentix gives you an agent runtime (one `:gen_statem` per conversation),
 non-blocking turns (streaming and tool execution as tasks), a per-turn hook
 pipeline, an explicit tool/HITL executor model, reducer-based compaction,
-pluggable persistence, and a headless LiveView rendering layer.
+provider retry/backoff, structured output, pluggable persistence, and a headless
+LiveView rendering layer.
 
 ## Installation
 
@@ -21,7 +22,7 @@ Add `agentix` to your dependencies:
 ```elixir
 def deps do
   [
-    {:agentix, "~> 0.1"}
+    {:agentix, "~> 0.2"}
   ]
 end
 ```

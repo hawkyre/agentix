@@ -36,13 +36,46 @@ defmodule Agentix.Conversation do
   Sends a user `message` to the conversation under `scope`, starting the agent if
   needed (pass `config:` in `opts` for a new conversation). Returns `:ok` once the
   turn is accepted, or `{:error, :busy}` if a turn is already in flight.
+
+  Per-turn `opts`:
+
+    * `:schema` — structured output for this turn only. A NimbleOptions keyword or a
+      JSON Schema map makes the model return a conforming object (surfaced via
+      `Agentix.object/1`); `false` opts out of the conversation's `response_format`
+      default for this one turn. Omitting it uses that default (or plain text).
   """
   @spec send_message(String.t(), message(), Scope.t(), keyword()) :: :ok | {:error, term()}
   def send_message(conversation_id, message, %Scope{} = scope, opts \\ []) do
+    turn_opts = Keyword.take(opts, [:schema])
+    validate_turn_opts!(turn_opts)
+
     with {:ok, _pid} <- ensure_started(conversation_id, opts) do
-      :gen_statem.call(Agent.via(conversation_id), {:send_message, message, scope})
+      :gen_statem.call(Agent.via(conversation_id), {:send_message, message, scope, turn_opts})
     end
   end
+
+  # Validate the per-turn `:schema` at the boundary (the config-level default is validated
+  # in `Config.new/2`; a per-turn override must meet the same bar, plus `false`/`nil` to opt
+  # out). A bad value is a caller error, so raise here rather than crash deep in the provider.
+  defp validate_turn_opts!(turn_opts) do
+    case Keyword.fetch(turn_opts, :schema) do
+      :error -> :ok
+      {:ok, schema} -> validate_schema!(schema)
+    end
+  end
+
+  defp validate_schema!(schema) when schema in [false, nil], do: :ok
+  defp validate_schema!(schema) when is_map(schema) and map_size(schema) > 0, do: :ok
+
+  defp validate_schema!(schema) when is_list(schema) and schema != [] do
+    if Keyword.keyword?(schema), do: :ok, else: raise(ArgumentError, schema_error(schema))
+  end
+
+  defp validate_schema!(schema), do: raise(ArgumentError, schema_error(schema))
+
+  defp schema_error(value),
+    do:
+      ":schema must be false, nil, a non-empty keyword, or a non-empty map, got: #{inspect(value)}"
 
   @doc "Cancels the in-flight turn from any non-idle state. A no-op if not running."
   @spec cancel(String.t()) :: :ok

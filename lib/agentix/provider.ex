@@ -38,6 +38,13 @@ defmodule Agentix.Provider do
   Starts a streaming completion for `model` over `context`. Returns `{:ok,
   %Stream{}}` or `{:error, reason}`. The caller consumes `chunks` fully, may call
   `cancel.()` to abort, and calls `finalize.()` after consumption.
+
+  Recognized `opts` keys (an implementation may ignore any it doesn't support):
+
+    * `:tools` — provider-formatted tool schemas for this turn.
+    * `:schema` — an output schema (NimbleOptions keyword or JSON Schema map) requesting
+      structured output; the implementation should return the parsed object in the
+      finalized message's `metadata["object"]` (see `Agentix.object/1`).
   """
   @callback stream(model :: term(), context :: ReqLLM.Context.t(), opts :: keyword()) ::
               {:ok, Stream.t()} | {:error, term()}

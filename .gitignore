@@ -30,3 +30,6 @@ agentix-*.tar
 
 # Example built asset bundles (vendored sources under assets/vendor ARE committed)
 /examples/*/priv/static/assets/
+
+# Implementation plans (local only)
+.plans/

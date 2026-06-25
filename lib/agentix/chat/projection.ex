@@ -62,6 +62,9 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       |> assign(:streaming?, streaming?(snapshot.state))
       |> assign(:in_flight_tools, snapshot.in_flight_tools)
       |> assign(:pending, snapshot.pending)
+      # The structured-output object of the most recent assistant message (nil if it was
+      # plain text), so a host can render it without digging into the message stream.
+      |> assign(:last_object, last_object(snapshot.messages))
       # Has the current assistant turn already shown its header? Continuation rows
       # (tools, later streaming, pending) render headerless once it has, so a turn
       # never shows a second "Assistant" header.
@@ -135,6 +138,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         :agentix_assistant_open,
         role == :assistant or socket.assigns.agentix_assistant_open
       )
+      |> maybe_assign_object(role, message)
     end
 
     def apply_event(socket, {:tool_call_started, id, name, executor, _args}) do
@@ -210,6 +214,19 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
 
     defp prompt_args(prompt) when is_map(prompt), do: prompt[:args] || prompt["args"]
     defp prompt_args(prompt), do: prompt
+
+    defp maybe_assign_object(socket, :assistant, message),
+      do: assign(socket, :last_object, Agentix.object(message))
+
+    defp maybe_assign_object(socket, _role, _message), do: socket
+
+    # The structured object of the most recent assistant message in `messages`, or nil.
+    defp last_object(messages) do
+      case messages |> Enum.reverse() |> Enum.find(&match?(%Message{role: :assistant}, &1)) do
+        %Message{} = message -> Agentix.object(message)
+        nil -> nil
+      end
+    end
 
     defp seed_streaming(socket, nil), do: assign(socket, :streaming_message, nil)
 
