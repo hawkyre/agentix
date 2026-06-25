@@ -6,7 +6,11 @@ defmodule Agentix.Test do
 
     * `install_mock_provider/0` — make `Agentix.Test.MockProvider` the active
       provider and start it.
-    * `completion/2` — build a scripted response spec (text, tool calls, thinking).
+    * `completion/2` — build a scripted response spec (text, tool calls, thinking,
+      and an optional structured `:object`).
+    * `error/2` and `transport_error/1` — build a scripted *failure* spec so the mock
+      provider returns `{:error, reason}` (an HTTP status error or a connection drop),
+      for exercising the retry path.
     * `assert_tool_called/2` and `assert_suspended_on/2` — assert on what the agent
       durably recorded (the canonical log and pending tool calls), not on internal
       state, so the assertions hold across a kill/resume.
@@ -19,6 +23,7 @@ defmodule Agentix.Test do
 
   alias Agentix.Persistence
   alias Agentix.Test.MockProvider
+  alias ReqLLM.Error.API.Request
 
   @doc """
   Installs the mock provider (sets `config :agentix, :provider` and starts it).
@@ -47,7 +52,9 @@ defmodule Agentix.Test do
   Builds a response spec for the mock provider.
 
   Options: `:tool_calls` (a list of `{name, arguments_map}`), `:thinking` (reasoning
-  text), `:usage` (a usage map). Pass the result to `Agentix.Test.MockProvider.script/1`.
+  text), `:usage` (a usage map), `:object` (a structured-output value placed in the
+  finalized message's `metadata["object"]`). Pass the result to
+  `Agentix.Test.MockProvider.script/1`.
   """
   @spec completion(String.t(), keyword()) :: map()
   def completion(text, opts \\ []) when is_binary(text) do
@@ -55,8 +62,49 @@ defmodule Agentix.Test do
       text: text,
       thinking: Keyword.get(opts, :thinking),
       tool_calls: Keyword.get(opts, :tool_calls, []),
-      usage: Keyword.get(opts, :usage, %{})
+      usage: Keyword.get(opts, :usage, %{}),
+      object: Keyword.get(opts, :object)
     }
+  end
+
+  @doc """
+  Builds a *failure* spec: the next `stream/3` call returns `{:error, reason}` where
+  `reason` is a `ReqLLM.Error.API.Request` carrying `status` (the HTTP code). Matches
+  the shape ReqLLM surfaces for 4xx/5xx so `Agentix.Retry`'s classifier sees real data.
+
+  Options: `:reason` (the message string), `:retry_after` (seconds, placed in the
+  `retry-after` response header for the backoff to honor).
+  """
+  @spec error(pos_integer(), keyword()) :: map()
+  def error(status, opts \\ []) when is_integer(status) do
+    retry_after = Keyword.get(opts, :retry_after)
+    headers = if retry_after, do: %{"retry-after" => to_string(retry_after)}, else: %{}
+
+    reason =
+      Request.exception(
+        reason: Keyword.get(opts, :reason, "mock HTTP #{status}"),
+        status: status,
+        headers: headers
+      )
+
+    %{__error__: reason}
+  end
+
+  @doc """
+  Builds a *failure* spec for a transport-level error (connection drop / timeout):
+  `stream/3` returns `{:error, reason}` with `status: nil` and the transport `reason`
+  as the cause — the shape ReqLLM produces when the socket fails before any HTTP status.
+  """
+  @spec transport_error(atom()) :: map()
+  def transport_error(reason \\ :closed) when is_atom(reason) do
+    error =
+      Request.exception(
+        reason: "mock transport error: #{reason}",
+        status: nil,
+        cause: reason
+      )
+
+    %{__error__: error}
   end
 
   @doc """
