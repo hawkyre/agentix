@@ -3,7 +3,7 @@ defmodule Agentix.Notifier.PubSub do
   The default `Agentix.Notifier` — broadcasts live events over `Phoenix.PubSub`.
 
   The `pubsub` name is the host's registered `Phoenix.PubSub` (or `Agentix.PubSub`,
-  which `Agentix.Application` starts when the host provides none). A missing pub/sub
+  which the Agentix application starts when the host provides none). A missing pub/sub
   process raises a clear configuration error rather than a cryptic `:noproc`.
   """
 

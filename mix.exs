@@ -124,9 +124,49 @@ defmodule Agentix.MixProject do
 
   defp docs do
     [
-      main: "Agentix",
+      main: "readme",
       source_ref: "v#{@version}",
-      extras: ["README.md", "guides/installation.md", "CHANGELOG.md"]
+      extras: [
+        "README.md",
+        "guides/installation.md",
+        "guides/architecture.md",
+        "guides/hooks-and-turn-lifecycle.md",
+        "guides/tools.md",
+        "guides/persistence-and-resumability.md",
+        "guides/compaction.md",
+        "guides/rendering.md",
+        "guides/memory-and-sizing.md",
+        "CHANGELOG.md"
+      ],
+      groups_for_extras: [
+        Guides: ~r"guides/.*"
+      ],
+      groups_for_modules: [
+        Core: [
+          Agentix,
+          Agentix.Conversation,
+          Agentix.Conversation.Config,
+          Agentix.Scope,
+          Agentix.Event,
+          Agentix.Executor
+        ],
+        "Tools & HITL": [Agentix.Tool, Agentix.Turn],
+        Hooks: [Agentix.Hook, Agentix.Hook.OverflowError],
+        "Compaction & tokens": [Agentix.Tokenizer, Agentix.Tokenizer.Heuristic],
+        Persistence: [
+          Agentix.Persistence,
+          Agentix.Persistence.ETS,
+          Agentix.Persistence.Ecto
+        ],
+        Providers: [Agentix.Provider, Agentix.Provider.Stream, Agentix.Provider.ReqLLM],
+        "Events & notifiers": [
+          Agentix.Notifier,
+          Agentix.Notifier.PubSub,
+          Agentix.Notifier.None
+        ],
+        "Rendering (LiveView)": [Agentix.Chat, Agentix.Components],
+        Testing: [Agentix.Test, Agentix.Test.MockProvider]
+      ]
     ]
   end
 end

@@ -14,9 +14,9 @@ defmodule Agentix do
   alias Agentix.Scope
 
   @doc """
-  Resolves a suspended tool call. Public and not socket-bound — see
-  `Agentix.Resolve`. `scope` defaults to the system scope (the documented scope for
-  timeout-driven resolutions).
+  Resolves a suspended tool call. Public and not socket-bound — a LiveView,
+  webhook, job, or timeout all call it the same way. `scope` defaults to the system
+  scope (the documented scope for timeout-driven resolutions).
 
   Returns `:ok` if the id was pending, or `{:error, :stale}` if it is unknown or
   already resolved.

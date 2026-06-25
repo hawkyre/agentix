@@ -3,8 +3,8 @@ defmodule Agentix.Persistence.ETS do
   Ephemeral ETS persistence adapter — the default, no-database option.
 
   Reads and high-frequency single-writer-per-conversation writes (append,
-  fsm_state, summaries) run directly against the named public tables owned by
-  `Agentix.Persistence.ETS.Owner`. Per-conversation `seq` is allocated atomically
+  fsm_state, summaries) run directly against the named public tables owned by a
+  dedicated owner process. Per-conversation `seq` is allocated atomically
   with `:ets.update_counter/4`. Tool-call resolution and suspension expiry — which
   may race across processes — are serialized through the owner.
 

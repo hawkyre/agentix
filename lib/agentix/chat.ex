@@ -4,7 +4,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     The headless LiveView layer: conversation state and verbs, no markup.
 
     `use Agentix.Chat` in a host LiveView installs an `on_mount` hook that routes a
-    conversation's live events into assigns (via `Agentix.Chat.Projection`) and imports
+    conversation's live events into assigns (via an internal projection) and imports
     the verbs below. The host owns the template — it renders its own HEEx against the
     projected assigns (`:messages`, `:streaming_message`, `:state`, `:streaming?`,
     `:in_flight_tools`, `:pending`); default components are a separate, optional layer.
@@ -23,8 +23,8 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         end
 
     The in-progress assistant text is streamed to a JS hook (shipped at
-    `priv/static/agentix_stream_hook.js`) rather than held in an assign — see
-    `Agentix.Chat.Projection`. This module is defined only when `phoenix_live_view` is
+    `priv/static/agentix_stream_hook.js`) rather than held in an assign, so a growing
+    string is never re-diffed. This module is defined only when `phoenix_live_view` is
     available; headless/API consumers omit the dependency and never load it.
     """
 

@@ -3,6 +3,8 @@ defmodule Agentix.ExecutorTest do
 
   alias Agentix.Executor
 
+  doctest Executor
+
   test "all/0 is the closed executor set" do
     assert Executor.all() == [:server, :human, :client, :provider]
   end

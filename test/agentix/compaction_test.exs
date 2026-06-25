@@ -13,6 +13,7 @@ defmodule Agentix.CompactionTest do
   alias ReqLLM.Message.ContentPart
   alias ReqLLM.ToolCall
 
+  doctest Heuristic
   defp state(config), do: %State{config: config}
   defp user(text), do: %Message{role: :user, content: [ContentPart.text(text)]}
   defp assistant(text), do: %Message{role: :assistant, content: [ContentPart.text(text)]}

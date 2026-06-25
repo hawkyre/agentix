@@ -12,8 +12,8 @@ runnable example apps in this repo prove each end of the range:
 
 ## Tier 1 — Headless / API-only (no LiveView, no database)
 
-The core runtime needs no web framework and no database. `Agentix.Application` boots its own
-registry, task supervisor, ETS persistence, and `Phoenix.PubSub` (the live-event backbone).
+The core runtime needs no web framework and no database. The Agentix OTP application boots its
+own registry, task supervisor, ETS persistence, and `Phoenix.PubSub` (the live-event backbone).
 
 ```elixir
 # mix.exs

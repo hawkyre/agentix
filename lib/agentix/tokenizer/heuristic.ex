@@ -9,6 +9,12 @@ defmodule Agentix.Tokenizer.Heuristic do
 
   @behaviour Agentix.Tokenizer
 
+  @doc """
+  Estimates the token count of `text` as `bytes × 3 ÷ 10 + 1`.
+
+      iex> Agentix.Tokenizer.Heuristic.count("hello world")
+      4
+  """
   # bytes × 3/10 ≈ bytes/3.33 — about 20% above the bytes/4 baseline (the safety margin).
   @impl true
   def count(text) when is_binary(text), do: div(byte_size(text) * 3, 10) + 1
