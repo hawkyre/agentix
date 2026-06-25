@@ -1,6 +1,6 @@
 # Reliability & structured output
 
-Two per-conversation knobs added in 0.1.1, both configured on
+Two per-conversation knobs added in 0.2.0, both configured on
 `Agentix.Conversation.Config` and both additive (existing code is unaffected).
 
 ## Retry & backoff
