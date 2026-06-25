@@ -423,10 +423,12 @@ defmodule Agentix.Agent do
     # max_tokens, pool config) are derived from config in a later increment.
     opts = stream_opts(data.config)
     transformer = data.config.stream_transformer
+    retry = data.config.retry
+    conversation_id = data.conversation_id
 
     %{pid: pid, ref: ref} =
       Task.Supervisor.async_nolink(Agentix.TaskSupervisor, fn ->
-        run_stream(agent, turn.ref, model, context, opts, transformer)
+        run_stream(agent, turn.ref, model, context, opts, transformer, retry, conversation_id)
       end)
 
     :telemetry.execute(
@@ -991,13 +993,15 @@ defmodule Agentix.Agent do
 
   ## Streaming task (runs under Agentix.TaskSupervisor)
 
-  defp run_stream(agent, turn_ref, model, context, opts, transformer) do
-    case Provider.stream(model, context, opts) do
+  defp run_stream(agent, turn_ref, model, context, opts, transformer, retry, conversation_id) do
+    case open_stream(model, context, opts, retry, turn_ref, conversation_id) do
       {:ok, stream} ->
         send(agent, {:stream_started, turn_ref, stream.cancel})
 
         # The stream-transformer seam: one `(chunk -> chunk)` pass per chunk
         # (identity when unset), applied here at the provider seam before forwarding.
+        # A failure during enumeration (after this point) crashes the task and fails the
+        # turn — it is never retried, since tokens may already have streamed to the client.
         Enum.each(stream.chunks, fn chunk ->
           send(agent, {:chunk, turn_ref, Hook.transform_chunk(chunk, transformer)})
         end)
@@ -1009,6 +1013,48 @@ defmodule Agentix.Agent do
         send(agent, {:stream_error, turn_ref, reason})
     end
   end
+
+  # Open the provider stream, retrying the *pre-stream* call on a transient error per the
+  # conversation's `retry` policy. `false` (or `max_attempts: 1`) means a single attempt.
+  defp open_stream(model, context, opts, retry, turn_ref, conversation_id) do
+    attempt_stream(model, context, opts, retry, turn_ref, conversation_id, 1, max_attempts(retry))
+  end
+
+  defp attempt_stream(model, context, opts, retry, turn_ref, conversation_id, attempt, max_attempts) do
+    case Provider.stream(model, context, opts) do
+      {:ok, stream} ->
+        {:ok, stream}
+
+      {:error, reason} ->
+        if attempt < max_attempts and Agentix.Retry.retryable?(reason) do
+          delay = Agentix.Retry.delay(attempt, retry, Agentix.Retry.retry_after_ms(reason))
+
+          :telemetry.execute(
+            [:agentix, :turn, :retry],
+            %{attempt: attempt, delay_ms: delay},
+            %{conversation_id: conversation_id, turn_ref: turn_ref, reason: reason}
+          )
+
+          Process.sleep(delay)
+
+          attempt_stream(
+            model,
+            context,
+            opts,
+            retry,
+            turn_ref,
+            conversation_id,
+            attempt + 1,
+            max_attempts
+          )
+        else
+          {:error, reason}
+        end
+    end
+  end
+
+  defp max_attempts(false), do: 1
+  defp max_attempts(%{max_attempts: n}) when is_integer(n) and n > 0, do: n
 
   defp handle_chunk(%{type: :content, text: text}, data) when is_binary(text) do
     turn = data.turn
