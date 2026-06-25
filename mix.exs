@@ -116,7 +116,11 @@ defmodule Agentix.MixProject do
   defp package do
     [
       licenses: ["MIT"],
-      links: %{"GitHub" => @source_url},
+      links: %{
+        "GitHub" => @source_url,
+        "Changelog" => "#{@source_url}/blob/main/CHANGELOG.md",
+        "HexDocs" => "https://hexdocs.pm/agentix"
+      },
       files:
         ~w(lib priv/static priv/templates guides mix.exs README.md CHANGELOG.md LICENSE .formatter.exs)
     ]
