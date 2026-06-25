@@ -1,18 +1,6 @@
 defmodule Agentix.Persistence.ETS.Owner do
-  @moduledoc """
-  Owns the ETS adapter's named public tables and serializes the operations that
-  need cross-process atomicity: tool-call resolution and suspension expiry.
-
-  The tables are **public**, so high-frequency, single-writer-per-conversation
-  operations (append, reads, fsm_state) run directly in the caller — they don't go
-  through this process. Only `resolve_tool_call/3` (callable concurrently from a
-  LiveView, a webhook, a job, or the expiry timer) and the timer bookkeeping are
-  serialized here, giving an atomic compare-and-set without a match-spec.
-
-  The agent must never own these tables: if it did, a killed agent would take the
-  log with it and kill-and-resume could not work. On owner restart the (volatile)
-  tables are recreated empty — acceptable for the ephemeral ETS adapter.
-  """
+  @moduledoc false
+  # Owns the ETS adapter's named public tables and serializes the operations that
 
   use GenServer
 

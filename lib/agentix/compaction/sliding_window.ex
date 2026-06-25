@@ -1,19 +1,6 @@
 defmodule Agentix.Compaction.SlidingWindow do
-  @moduledoc """
-  Caps the dialogue tail to the last `compaction_window` turns.
-
-  **Not wired into the assembly path today:** keeping the rendered tail append-only
-  between turns is what makes the prompt cache effective, so per-turn trimming is
-  deliberately avoided (summarization is the sole shrink). This reducer is kept and
-  tested for a future discrete, boundary-aligned variant.
-
-  Works at **turn** granularity (a turn = a user message plus the assistant/tool
-  messages that follow it, up to the next user message), so dropping old turns can
-  never orphan a `tool_call`/`tool_result` pair — both live inside the same turn.
-  The leading prefix (system prompt + summary, before the first user message) is
-  always kept; everything older than the window is dropped (the prefix-ward summary
-  is what preserves that span's gist).
-  """
+  @moduledoc false
+  # Caps the dialogue tail to the last `compaction_window` turns.
 
   alias Agentix.Compaction.State
   alias ReqLLM.Context

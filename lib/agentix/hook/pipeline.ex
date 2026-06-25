@@ -1,21 +1,6 @@
 defmodule Agentix.Hook.Pipeline do
-  @moduledoc """
-  Runs the hook pipelines around a model call.
-
-  `run_pre/3` runs the pre-hooks against the assembled turn: sequential hooks first
-  (in declaration order, each may transform the turn or `:halt`, short-circuiting the
-  rest), then parallel append-only hooks concurrently (their `[ContentPart]` outputs
-  appended in declaration order). After every hook that injects, the cumulative
-  injection is checked against `injection_reserve`; an overflow raises
-  `Agentix.Hook.OverflowError` naming that hook (the check happens once — compaction
-  is never re-entered).
-
-  `run_post/2` runs the post-hooks sequentially after the assistant message finalizes.
-
-  A pre-hook injects by appending to `turn.injections` via `Agentix.Hook.inject/2`;
-  the agent places those parts at the context tail at assembly time (past the
-  prompt-cache breakpoint). Injections are sized via `Agentix.Tokenizer`.
-  """
+  @moduledoc false
+  # Runs the hook pipelines around a model call.
 
   alias Agentix.Hook
   alias Agentix.Hook.OverflowError

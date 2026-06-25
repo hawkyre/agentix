@@ -1,28 +1,6 @@
 defmodule Agentix.Compaction.ToolResult do
-  @moduledoc """
-  Tool-result retention — stubs expired tool results to shrink the fattest target in
-  tool-heavy conversations.
-
-  **Not wired into the assembly path today:** per-turn trimming mutates already-sent
-  history and breaks the provider prompt cache, so the rendered tail is kept
-  append-only between turns (summarization is the sole shrink). This reducer is kept
-  and tested for a future discrete, boundary-aligned variant.
-
-  An expired result is **stubbed, not dropped**: its content becomes `[result
-  expired]`. A `tool_call` and its `tool_result` are a pair (providers reject
-  orphans), so stubbing keeps the pairing intact and still signals to the model that
-  the call happened (so it doesn't re-issue it). The real result stays in the log
-  forever — this only shapes the rendered context.
-
-  Retention comes from the tool's own `retention` (per-tool override), else the
-  conversation's global `tool_retention` default. Two modes (unit = turns):
-
-    * `:age` — keep a result for the last `value` turns, then expire it;
-    * `:count` — keep the last `value` results *from that same tool*.
-
-  `never_evict: true` keeps a result verbatim regardless. Token budget is not
-  consulted here — retention is a fixed policy; budget drives summarization instead.
-  """
+  @moduledoc false
+  # Tool-result retention — stubs expired tool results to shrink the fattest target in
 
   alias Agentix.Compaction.State
   alias ReqLLM.Context

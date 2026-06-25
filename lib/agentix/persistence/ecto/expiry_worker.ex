@@ -3,14 +3,8 @@
 # expiry without adding `:oban`.
 if Code.ensure_loaded?(Oban) do
   defmodule Agentix.Persistence.Ecto.ExpiryWorker do
-    @moduledoc """
-    Oban worker that expires a still-pending tool call after its suspension timeout.
-
-    Durable by construction: the job lives in the database, so it fires even if the
-    agent process that scheduled it was killed. Rescheduling the same call replaces the
-    job's `scheduled_at` (the unique key is `conversation_id` + `tool_call_id`), so an
-    earlier timer never leaks.
-    """
+    @moduledoc false
+    # Oban worker that expires a still-pending tool call after its suspension timeout.
     use Oban.Worker,
       queue: :agentix_expiry,
       unique: [

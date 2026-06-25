@@ -1,29 +1,7 @@
 if Code.ensure_loaded?(Phoenix.LiveView) do
   defmodule Agentix.Chat.Projection do
-    @moduledoc """
-    Projects a conversation's snapshot and its live-event stream onto LiveView assigns.
-
-    The assigns owned here:
-
-      * `:messages` — a `Phoenix.LiveView.stream/3` of finalized `ReqLLM.Message`s;
-      * `:streaming_message` — `%{id}` for the assistant message currently being produced,
-        or `nil`. Its **text and thinking are deliberately not assigns** — both stream as
-        deltas pushed to the JS hook (tagged with `kind`) so a growing string is never
-        re-diffed server-side; only the finalized message lands in `:messages`;
-      * `:state` — the agent's current turn state, and `:streaming?` derived from it;
-      * `:in_flight_tools` — `%{tool_call_id => %{name, executor, status}}` for calls still
-        running (`status: :running`); a suspended call moves to `:pending`, and a resolved
-        call moves into `:messages` as a finalized tool row (so live and reload converge);
-      * `:pending` — `%{tool_call_id => %{name, executor, kind, prompt}}` awaiting resolution.
-
-    `attach/3` subscribes **before** reading the snapshot, so no event is lost in the
-    gap. Keyed entities (stream dom-ids, tool-call ids, last-write-wins `state`) are
-    idempotent under replay; **streamed deltas are not keyed**, so each carries a
-    monotonic `seq` and the snapshot reports the count so far — a delta already covered
-    by the snapshot (`seq` below the seeded value) is dropped rather than double-applied.
-    The snapshot and the live stream build identical `:pending`/`:in_flight_tools` entry
-    shapes, so a reconnect and a never-disconnected client converge.
-    """
+    @moduledoc false
+    # Projects a conversation's snapshot and its live-event stream onto LiveView assigns.
 
     import Phoenix.Component, only: [assign: 3, update: 3]
 

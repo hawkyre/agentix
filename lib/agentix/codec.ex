@@ -1,33 +1,6 @@
 defmodule Agentix.Codec do
-  @moduledoc """
-  JSON ↔ struct codec for the ReqLLM canonical types Agentix persists.
-
-  ReqLLM's `Context`, `Message`, `ContentPart`, `ToolCall`, and `ReasoningDetails`
-  all implement `Jason.Encoder`, so **encoding** to the JSON we store in the log is
-  free (`encode!/1`). ReqLLM exposes no public JSON→struct path, so this module
-  owns **decoding**: `decode_context/1`, `decode_message/1`, and
-  `decode_content_part/1` take a JSON-decoded (string-keyed) map and rebuild the
-  structs.
-
-  ## Why we rebuild structs from fields
-
-  The decoders are the faithful inverse of ReqLLM's `Jason.Encoder` implementations:
-  they map each encoded field back, converting the closed enums (`role`, content
-  `type`) and provider atoms from strings, and base64-decoding binary
-  `ContentPart` data. ReqLLM's public constructors (`ContentPart.text/2` etc.) are
-  lossy for round-tripping — e.g. `file/3` accepts no metadata — so reconstructing
-  from the full public field set is the only way to guarantee
-  `decode(encode(x)) == x`. The field set is pinned by golden tests so a ReqLLM
-  field rename is caught immediately.
-
-  ## What does not round-trip exactly
-
-  Free-form maps (`metadata`, `provider_data`, and tool-call `arguments`) carry
-  whatever the provider produced. JSON has no atom keys, so these round-trip as
-  **string-keyed** maps — the canonical persisted form. `Context.tools` are not
-  persisted (tools are config, rebuilt per agent), so `decode_context/1` returns a
-  context with no tools.
-  """
+  @moduledoc false
+  # JSON ↔ struct codec for the ReqLLM canonical types Agentix persists.
 
   alias ReqLLM.Context
   alias ReqLLM.Message

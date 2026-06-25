@@ -1,13 +1,6 @@
 defmodule Agentix.Tool.Dispatch do
-  @moduledoc """
-  Runs a `:server` tool callback off the agent process.
-
-  The callback runs in a monitored task under `Agentix.TaskSupervisor` (the agent
-  never blocks on it), receiving `(parsed_args, %Agentix.Turn{})`. Its return is
-  normalized to the model-visible result convention and sent back to the agent as
-  `{:tool_done, turn_ref, tool_call_id, result}`. A raised exception becomes an
-  `%{ok: false, ...}` error result rather than crashing the turn.
-  """
+  @moduledoc false
+  # Runs a `:server` tool callback off the agent process.
 
   alias Agentix.Tool
   alias Agentix.Turn

@@ -1,18 +1,6 @@
 defmodule Agentix.Events.Publisher do
-  @moduledoc """
-  Builds and broadcasts the **live-event union** (the PubSub plane).
-
-  This module is the single declared home of the closed union of live events. The
-  agent constructs nothing inline — it calls the typed helpers here, so tool and
-  LiveView consumers project against one source of truth.
-
-  A `t:context/0` (built once per agent from its config via `new/2`) carries the
-  resolved notifier module, the pub/sub name, and the conversation topic. Every
-  helper takes that context and fires through `Agentix.Notifier`, which is lossy by
-  contract — a dropped broadcast never affects the canonical log.
-
-  Topic convention: `"agentix:conversation:<conversation_id>"`.
-  """
+  @moduledoc false
+  # Builds and broadcasts the live-event union (the PubSub plane).
 
   alias Agentix.Conversation.Config
   alias Agentix.Notifier

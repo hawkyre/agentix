@@ -1,19 +1,6 @@
 defmodule Agentix.Compaction.Summarize do
-  @moduledoc """
-  The only model-calling, lossy, expensive compaction reducer — kept off the
-  critical path, and the sole context shrink on the assembly path.
-
-  It runs **asynchronously between turns** (`start/2` from the agent at turn end, only
-  when the context is over budget), never blocking the next user turn. It collapses the **oldest** turns (prefix-ward) into a single, growing
-  front summary and writes a derived `summaries` row. Assembly (`load_since`) then
-  reads "latest summary + verbatim tail"; a revived agent reconstructs from log +
-  summaries with no `compacting` state — compaction stays out of suspend/resume.
-
-  The summary is **cumulative**: each pass folds the previous summary plus the newly
-  collapsed turns into one summary covering `[1, to_seq]`, leaving the last
-  `@keep_turns` turns verbatim. Splitting on turn boundaries keeps every
-  `tool_call`/`tool_result` pair on the same side — no orphans.
-  """
+  @moduledoc false
+  # The only model-calling, lossy, expensive compaction reducer — kept off the
 
   alias Agentix.Codec
   alias Agentix.Event

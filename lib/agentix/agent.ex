@@ -1,48 +1,6 @@
 defmodule Agentix.Agent do
-  @moduledoc """
-  The per-conversation agent — one `:gen_statem` process per conversation, addressed
-  through `Agentix.Registry` and started under `Agentix.ConversationSupervisor`.
-
-  ## States (turn loop)
-
-      idle ─send_message─> preparing ─> streaming ─done(no tools)─> idle
-                                          │
-                                          └─done(tool_calls)─> executing_tools
-      executing_tools ─all resolved─> preparing (next model call, same turn)
-      executing_tools ─any suspends─> awaiting_input ─resolve─> preparing
-      any non-idle ─cancel─> idle (records a partial assistant turn)
-
-  A tool loop is several model calls **under one turn** — `executing_tools`/
-  `awaiting_input` loop back into `preparing` (same `turn_ref`, new assistant
-  message); only a tool-free completion ends the turn. Callback mode is
-  `:state_functions`.
-
-  ## Non-blocking principle
-
-  The process never blocks on I/O. The LLM stream runs in a **monitored task**
-  (under `Agentix.TaskSupervisor`); chunks arrive as `{:chunk, …}` messages,
-  completion as `{:stream_done, …}`, failure surfaces via the task's `DOWN`. Inside
-  the agent only bookkeeping happens (append to the log, broadcast a live event,
-  pick the next transition), so `cancel`/`inspect` are always serviceable.
-
-  ## Durability
-
-  The append-only event log (`Agentix.Persistence`) is the source of truth; the
-  agent rebuilds its working context from the log every turn and re-reads the max
-  `seq` on revival. On `ensure_started`, `revive/2` reconciles the kill boundary:
-
-    * a conversation suspended on a HITL tool comes back in `:awaiting_input` with its
-      `calls` map rebuilt from the durable records, re-arming the timeout, so a post-kill
-      `Agentix.resolve/4` is accepted (not `{:error, :stale}`);
-    * a dangling `:tool_call` (no paired `:tool_result` — an auto-server tool killed
-      mid-run, or one a durable expiry resolved while dead) is paired with the durable
-      result if any, else an interrupted error (the tool is **not** re-executed);
-    * a log ending in a dangling `:user_msg` (killed before any dispatch) is **re-run**.
-
-  Suspension timeouts are armed twice — an in-process timer (drives the live agent) and a
-  durable adapter-backed one (`schedule_expiry/3`, survives a kill); whichever fires first
-  records the result, the other is a stale no-op.
-  """
+  @moduledoc false
+  # The per-conversation agent — one `:gen_statem` process per conversation, addressed
 
   @behaviour :gen_statem
 
