@@ -139,7 +139,13 @@ if Code.ensure_loaded?(Phoenix.Component) do
             id={@id && @id <> "-text"}
             phx-hook={markdown_hook(@id)}
             data-md={markdown_hook(@id) && message_text(@message)}
-            class="whitespace-pre-wrap text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200"
+            class={[
+              "text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200",
+              # Markdown renders to HTML (the block tags own their spacing); plain text keeps
+              # newlines via `whitespace-pre-wrap`. The two are mutually exclusive — applying
+              # both makes the inter-block newlines marked emits show as blank lines.
+              if(markdown_hook(@id), do: "agentix-md", else: "whitespace-pre-wrap")
+            ]}
           >{message_text(@message)}</div>
           {render_slot(@bubble, @message)}
         </div>
@@ -157,7 +163,7 @@ if Code.ensure_loaded?(Phoenix.Component) do
         phx-hook="AgentixStream"
         phx-update="ignore"
         data-msg-id={@message.id}
-      ><div data-agentix="thinking" hidden class="mb-3 whitespace-pre-wrap text-[13px] leading-relaxed text-neutral-500 dark:text-neutral-400"></div><div data-agentix="text" data-markdown={to_string(markdown?())} class="caret whitespace-pre-wrap text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200"></div></div>
+      ><div data-agentix="thinking" hidden class="mb-3 whitespace-pre-wrap text-[13px] leading-relaxed text-neutral-500 dark:text-neutral-400"></div><div data-agentix="text" data-markdown={to_string(markdown?())} class={["caret text-[15px] leading-relaxed text-neutral-700 dark:text-neutral-200", if(markdown?(), do: "agentix-md", else: "whitespace-pre-wrap")]}></div></div>
       """
     end
 
@@ -346,6 +352,45 @@ if Code.ensure_loaded?(Phoenix.Component) do
         display: none;
       }
       details[open] .agentix-chev { transform: rotate(90deg); }
+
+      /* Markdown bodies render to HTML inside `.agentix-md`. A CSS reset (e.g. Tailwind's
+         preflight) strips list bullets and heading sizes, so restore readable defaults here,
+         scoped so they never leak into the host's own styles. */
+      .agentix-md > :first-child { margin-top: 0; }
+      .agentix-md > :last-child { margin-bottom: 0; }
+      .agentix-md p { margin: 0.5em 0; }
+      .agentix-md h1, .agentix-md h2, .agentix-md h3, .agentix-md h4 {
+        font-weight: 600; line-height: 1.3; margin: 1em 0 0.4em;
+      }
+      .agentix-md h1 { font-size: 1.3em; }
+      .agentix-md h2 { font-size: 1.15em; }
+      .agentix-md h3 { font-size: 1.05em; }
+      .agentix-md ul, .agentix-md ol { margin: 0.5em 0; padding-left: 1.5em; }
+      .agentix-md ul { list-style: disc; }
+      .agentix-md ol { list-style: decimal; }
+      .agentix-md li { margin: 0.2em 0; }
+      .agentix-md li > ul, .agentix-md li > ol { margin: 0.2em 0; }
+      .agentix-md pre {
+        margin: 0.6em 0; padding: 0.75em 0.9em; border-radius: 0.5rem;
+        overflow-x: auto; font-size: 0.85em; line-height: 1.45; background: rgb(0 0 0 / 0.05);
+      }
+      .agentix-md :not(pre) > code {
+        font-size: 0.88em; padding: 0.1em 0.35em; border-radius: 0.3rem; background: rgb(0 0 0 / 0.06);
+      }
+      .agentix-md pre code { background: none; padding: 0; font-size: 1em; }
+      .agentix-md blockquote {
+        margin: 0.6em 0; padding-left: 0.9em; border-left: 3px solid rgb(0 0 0 / 0.15); opacity: 0.85;
+      }
+      .agentix-md a { text-decoration: underline; }
+      .agentix-md strong { font-weight: 600; }
+      .agentix-md hr { margin: 1em 0; border: 0; border-top: 1px solid rgb(0 0 0 / 0.1); }
+      .agentix-md table { border-collapse: collapse; margin: 0.6em 0; }
+      .agentix-md th, .agentix-md td { border: 1px solid rgb(0 0 0 / 0.15); padding: 0.3em 0.6em; }
+      .dark .agentix-md pre { background: rgb(255 255 255 / 0.06); }
+      .dark .agentix-md :not(pre) > code { background: rgb(255 255 255 / 0.08); }
+      .dark .agentix-md blockquote { border-left-color: rgb(255 255 255 / 0.2); }
+      .dark .agentix-md hr { border-top-color: rgb(255 255 255 / 0.12); }
+      .dark .agentix-md th, .dark .agentix-md td { border-color: rgb(255 255 255 / 0.15); }
       """
     end
 
