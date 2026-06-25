@@ -1,8 +1,10 @@
-# agentix_demo
+# agentix_demo — "Agentix, meet Agentix"
 
 A Tier-3 Agentix example: a LiveView chat backed by Postgres persistence and Oban-backed
-suspension expiry. It runs **with no API key** on a built-in offline provider, and talks to
-Anthropic Claude Haiku via ReqLLM when `ANTHROPIC_API_KEY` is set.
+suspension expiry, where **Claude answers questions about the Agentix library by reading its
+own source**. The assistant really `search_code`s the repo, `read_file`s the relevant modules,
+and — with your approval — `run_tests` on a specific file. Talks to Claude Haiku via ReqLLM
+when `ANTHROPIC_API_KEY` is set; falls back to a canned offline provider with no key.
 
 ## Run
 
@@ -30,19 +32,20 @@ Anthropic Claude Haiku via ReqLLM when `ANTHROPIC_API_KEY` is set.
 
 ## What to try
 
-At **`/`** (the chat):
+At **`/`** (the chat) — ask about Agentix; the model reads the real source to answer:
 
-- **Stream a reply** — send any message; the assistant streams its answer, with its reasoning
-  shown live above the text.
-- **Approval-gated server tool** — ask `weather in Tokyo`. The assistant calls `get_weather`
-  (a `:server` tool marked `:requires_approval`); approve or deny it inline. On approve the
-  tool runs and its result shows in the expandable inspector.
-- **Inline server tool** — ask `6 * 7`. The `calculator` (`:server`, no gate) runs inline.
-- **Human-in-the-loop** — a greeting like `hi` triggers `ask_user` (`:human`); answer the
-  elicitation form to resume the turn.
+- **"How does durable suspension work?"** / **"Where's the compaction pipeline?"** — the
+  assistant `search_code`s, `read_file`s the relevant modules, and answers citing real paths,
+  with its reasoning streamed live above the text. (Inline `:server` tools.)
+- **"Run the hook tests"** — it proposes `run_tests test/agentix/hook_test.exs`, an
+  **approval-gated** `:server` tool: approve or deny inline. On approve it runs and the output
+  shows in the expandable inspector.
 - **Reload** — the conversation lives at `/c/:id`; refreshing restores its history from
   Postgres.
 - **Theme** — the top-bar toggle flips light/dark (persisted in `localStorage`).
+
+The tools (`AgentixDemo.RepoTools`) are scoped to the repo: paths can't escape it, the search
+query/path are passed as argv (no shell injection), and output is capped.
 
 At **`/gallery`** (the storybook): every component in every state — messages, the reasoning
 panel, tool rows (running/ok/error + result inspector), approval & elicitation controls,

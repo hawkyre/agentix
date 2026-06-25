@@ -17,6 +17,9 @@ config :agentix_demo, AgentixDemoWeb.Endpoint,
 # Oban must not poll/stage during tests — expiry jobs are inserted but never run.
 config :agentix_demo, Oban, testing: :manual
 
+# Stub the `run_tests` tool so the demo's own suite never spawns a nested `mix test`.
+config :agentix_demo, :stub_tools, true
+
 # The library composer is a send-and-clear form; LiveView form recovery doesn't apply, so
 # the missing-form-id test warning is noise here.
 config :phoenix_live_view, :test_warnings, missing_form_id: :ignore

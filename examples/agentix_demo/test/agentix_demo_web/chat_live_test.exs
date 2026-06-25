@@ -28,8 +28,7 @@ defmodule AgentixDemoWeb.ChatLiveTest do
     install_mock_provider()
 
     # Conversation agents are long-lived (registered, never auto-stopped). Terminate every one
-    # after the test so an orphan doesn't outlive this test's sandbox checkout and crash (or
-    # contend) on the next test's shared connection.
+    # after the test so an orphan doesn't outlive it and contend on the next test's connection.
     on_exit(fn ->
       for {_, pid, _, _} <- DynamicSupervisor.which_children(Agentix.ConversationSupervisor),
           is_pid(pid) do
@@ -42,28 +41,65 @@ defmodule AgentixDemoWeb.ChatLiveTest do
     {:ok, id: id, conn: Plug.Test.init_test_session(build_conn(), %{})}
   end
 
-  test "streams a reply and resolves a HITL elicitation end-to-end", %{id: id, conn: conn} do
+  test "a non-gated :server tool (search_code) runs inline and shows its real result", %{
+    id: id,
+    conn: conn
+  } do
     MockProvider.script([
-      completion("", tool_calls: [{"ask_user", %{}}]),
-      completion("Thanks — all set.")
+      completion("", tool_calls: [{"search_code", %{"query" => "defmodule Agentix.Hook do"}}]),
+      completion("Found it in the Hook module.")
     ])
 
     {:ok, live, _html} = live(conn, "/c/" <> id)
-
-    live |> form("form[phx-submit='send']", %{"text" => "help me"}) |> render_submit()
-
-    # The :human tool suspends, awaiting an answer (elicitation) — the pending form renders.
-    assert_receive {:suspended, tool_call_id, :human, _prompt}, 2_000
-    assert render(live) =~ "pending-" <> tool_call_id
-
-    # Submit the answer through the pending form; the turn resumes and streams the reply.
-    live |> form("#pending-" <> tool_call_id, %{"answer" => "yes please"}) |> render_submit()
+    live |> form("form[phx-submit='send']", %{"text" => "where is the Hook module?"}) |> render_submit()
 
     assert_receive {:turn_completed, _ref}, 2_000
-    assert render(live) =~ "Thanks — all set."
+    html = render_until(live, "Found it in the Hook module.")
+    # The real search_code callback ran against the repo — its file:line result is in the inspector.
+    assert html =~ "lib/agentix/hook.ex"
+    assert html =~ "<details"
 
     # Durability: the turn's events were persisted to Postgres through the Ecto adapter.
     assert AgentixDemo.Repo.aggregate(Event, :count) > 0
+  end
+
+  test "the gated :server tool (run_tests) suspends for approval, then runs and shows its result",
+       %{id: id, conn: conn} do
+    MockProvider.script([
+      completion("", tool_calls: [{"run_tests", %{"path" => "test/agentix/hook_test.exs"}}]),
+      completion("All green.")
+    ])
+
+    {:ok, live, _html} = live(conn, "/c/" <> id)
+    live |> form("form[phx-submit='send']", %{"text" => "run the hook tests"}) |> render_submit()
+
+    assert_receive {:suspended, tcid, _executor, _prompt}, 2_000
+    assert render(live) =~ "Permission required"
+
+    live |> element("button[phx-value-id='#{tcid}']", "Allow") |> render_click()
+    assert_receive {:turn_completed, _ref}, 2_000
+
+    html = render_until(live, "All green.")
+    # run_tests is stubbed in the test env (config :agentix_demo, :stub_tools, true).
+    assert html =~ "would run: mix test test/agentix/hook_test.exs"
+    assert html =~ "<details"
+  end
+
+  test "denying the gated run_tests resolves it without running anything", %{id: id, conn: conn} do
+    MockProvider.script([
+      completion("", tool_calls: [{"run_tests", %{"path" => "test/agentix/hook_test.exs"}}]),
+      completion("Skipped the tests.")
+    ])
+
+    {:ok, live, _html} = live(conn, "/c/" <> id)
+    live |> form("form[phx-submit='send']", %{"text" => "run the tests"}) |> render_submit()
+
+    assert_receive {:suspended, tcid, _executor, _prompt}, 2_000
+    live |> element("button[phx-value-id='#{tcid}']", "Deny") |> render_click()
+    assert_receive {:turn_completed, _ref}, 2_000
+
+    html = render_until(live, "Skipped the tests.")
+    refute html =~ "would run: mix test"
   end
 
   test "a page reload reattaches to the same conversation and restores history", %{
@@ -96,62 +132,5 @@ defmodule AgentixDemoWeb.ChatLiveTest do
 
   test "visiting / redirects to a canonical /c/:id conversation URL", %{conn: conn} do
     assert {:error, {:live_redirect, %{to: "/c/" <> _id}}} = live(conn, "/")
-  end
-
-  test "a gated :server tool suspends for approval, then runs and shows its result inspector",
-       %{id: id, conn: conn} do
-    MockProvider.script([
-      completion("", tool_calls: [{"get_weather", %{"city" => "Tokyo"}}]),
-      completion("Here is your forecast.")
-    ])
-
-    {:ok, live, _html} = live(conn, "/c/" <> id)
-    live |> form("form[phx-submit='send']", %{"text" => "weather in Tokyo?"}) |> render_submit()
-
-    assert_receive {:suspended, tcid, _executor, _prompt}, 2_000
-    assert render(live) =~ "Permission required"
-
-    live |> element("button[phx-value-id='#{tcid}']", "Allow") |> render_click()
-    assert_receive {:turn_completed, _ref}, 2_000
-
-    html = render_until(live, "Here is your forecast.")
-    # The :server callback ran and its result shows in the expandable inspector.
-    assert html =~ "It&#39;s 21°C and sunny in Tokyo."
-    assert html =~ "<details"
-  end
-
-  test "denying a gated :server tool resolves it without running the tool", %{id: id, conn: conn} do
-    MockProvider.script([
-      completion("", tool_calls: [{"get_weather", %{"city" => "Tokyo"}}]),
-      completion("No problem, skipping that.")
-    ])
-
-    {:ok, live, _html} = live(conn, "/c/" <> id)
-    live |> form("form[phx-submit='send']", %{"text" => "weather in Tokyo?"}) |> render_submit()
-
-    assert_receive {:suspended, tcid, _executor, _prompt}, 2_000
-    live |> element("button[phx-value-id='#{tcid}']", "Deny") |> render_click()
-    assert_receive {:turn_completed, _ref}, 2_000
-
-    html = render_until(live, "No problem, skipping that.")
-    # The callback never ran, so the weather result is absent.
-    refute html =~ "21°C and sunny in Tokyo"
-  end
-
-  test "a non-gated :server tool (calculator) runs inline and shows its result", %{
-    id: id,
-    conn: conn
-  } do
-    MockProvider.script([
-      completion("", tool_calls: [{"calculator", %{"expression" => "6 * 7"}}]),
-      completion("Math done.")
-    ])
-
-    {:ok, live, _html} = live(conn, "/c/" <> id)
-    live |> form("form[phx-submit='send']", %{"text" => "what is 6 * 7"}) |> render_submit()
-
-    assert_receive {:turn_completed, _ref}, 2_000
-    html = render_until(live, "Math done.")
-    assert html =~ "6 * 7 = 42"
   end
 end

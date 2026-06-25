@@ -14,8 +14,9 @@ defmodule AgentixDemoWeb.GalleryLiveTest do
     # reasoning panel (the previously-unused .reasoning/1 is wired here)
     assert html =~ "Thought for 4s"
     # tool rows incl. the result inspector
-    assert html =~ "get_weather"
-    assert html =~ "sunny in Tokyo"
+    assert html =~ "search_code"
+    assert html =~ "run_tests"
+    assert html =~ "Agentix.Hook.Pipeline"
     assert html =~ "<details"
     # pending controls
     assert html =~ "Permission required"

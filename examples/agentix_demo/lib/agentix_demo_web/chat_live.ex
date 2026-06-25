@@ -66,7 +66,7 @@ defmodule AgentixDemoWeb.ChatLive do
       </div>
 
       <div class="sticky bottom-0 border-t border-neutral-200/70 bg-neutral-50/90 pb-5 pt-3 backdrop-blur dark:border-neutral-800/70 dark:bg-neutral-950/90">
-        <.composer streaming?={@streaming?} placeholder="Message the assistant…" />
+        <.composer streaming?={@streaming?} placeholder="Ask about the Agentix source…" />
       </div>
     </.app_shell>
     """
@@ -77,14 +77,20 @@ defmodule AgentixDemoWeb.ChatLive do
   defp intro(assigns) do
     ~H"""
     <div class="mt-4 rounded-lg border border-neutral-200 bg-white/60 px-4 py-3 text-sm text-neutral-600 dark:border-neutral-800 dark:bg-neutral-900/40 dark:text-neutral-300">
-      <p class="font-medium text-neutral-900 dark:text-neutral-100">Agentix chat demo</p>
+      <p class="font-medium text-neutral-900 dark:text-neutral-100">
+        Agentix, meet Agentix — ask the assistant about its own source
+      </p>
       <p class="mt-1">
-        Send a message to stream a reply. The assistant can ask you a clarifying question
-        (human-in-the-loop) — answer it inline to resume the turn.
+        Claude really reads this library's code to answer. It'll
+        <span class="font-medium">search</span>
+        the source, <span class="font-medium">read</span>
+        files, and — with your approval — <span class="font-medium">run a test file</span>.
+        Try: <em>"How does durable suspension work?"</em>, <em>"Where's the compaction
+        pipeline?"</em>, or <em>"Run the hook tests."</em>
       </p>
       <p :if={@offline?} class="mt-1 text-amber-700 dark:text-amber-400">
-        Running on the offline provider (no <code>ANTHROPIC_API_KEY</code>). Replies are canned;
-        set the key and restart for real Claude responses.
+        No <code>ANTHROPIC_API_KEY</code> set — running on the offline provider (canned replies).
+        Set the key and restart for the real thing.
       </p>
     </div>
     """
@@ -118,41 +124,71 @@ defmodule AgentixDemoWeb.ChatLive do
   # Ignore any out-of-range value (corrupt localStorage / a direct socket message) — never crash.
   def handle_event("theme-restored", _params, socket), do: {:noreply, socket}
 
+  @system_prompt """
+  You are the Agentix Assistant, embedded in the demo app of the Agentix library — and your
+  job is to answer questions about Agentix *by reading its own source code*. Agentix is a
+  LiveView-native agent runtime for Elixir, built on ReqLLM (one `:gen_statem` per
+  conversation, an executor-based tool/HITL model, a hook pipeline, reducer compaction, and
+  pluggable ETS/Ecto persistence).
+
+  Always ground your answers in the real code — don't guess:
+    1. Use `search_code` to find where something lives (returns file:line matches).
+    2. Use `read_file` to read the relevant module or guide.
+    3. Explain concisely and cite the real file paths you read.
+
+  When the user wants to verify behavior, you may call `run_tests` with a specific test file
+  (e.g. test/agentix/hook_test.exs) — that asks the user to approve running it. Prefer reading
+  source for "how does X work" questions; only run tests when asked to check that something works.
+  Keep replies tight and concrete; quote short snippets, not whole files.
+  """
+
   defp config do
-    # Three executors so the demo exercises every tool path:
-    #   * :server + :requires_approval  → runs your code, but gated behind approve/deny
-    #   * :server (non-gated)           → runs your code inline
-    #   * :human                        → suspends for a person's answer (elicitation)
-    weather =
+    # Real tools over the Agentix repo — two read-only (`:server`, run inline) and one
+    # approval-gated action (`:server` + `:requires_approval`) so the HITL gate guards a
+    # genuinely consequential operation (spawning the test suite).
+    search =
       Tool.new(
-        name: "get_weather",
-        description: "Look up the current weather for a city. Requires approval.",
+        name: "search_code",
+        description:
+          "Search the Agentix source (lib/ + guides/) for a string or symbol. Returns file:line matches. Use this first to locate where something is implemented.",
+        executor: :server,
+        parameter_schema: [
+          query: [type: :string, required: true, doc: "text or symbol to grep for"]
+        ],
+        callback: fn args, _turn -> {:ok, AgentixDemo.RepoTools.search_code(arg(args, "query"))} end
+      )
+
+    read =
+      Tool.new(
+        name: "read_file",
+        description:
+          "Read a file from the Agentix repo by path relative to the repo root (e.g. lib/agentix/hook.ex or guides/tools.md).",
+        executor: :server,
+        parameter_schema: [
+          path: [type: :string, required: true, doc: "repo-relative file path"]
+        ],
+        callback: fn args, _turn -> {:ok, AgentixDemo.RepoTools.read_file(arg(args, "path"))} end
+      )
+
+    run_tests =
+      Tool.new(
+        name: "run_tests",
+        description:
+          "Run a single Agentix test file (e.g. test/agentix/hook_test.exs) to verify behavior. Requires the user's approval before it runs.",
         executor: :server,
         approval: :requires_approval,
-        callback: fn args, _turn ->
-          city = args["city"] || args[:city] || "your area"
-          {:ok, "It's 21°C and sunny in #{city}."}
-        end
+        parameter_schema: [
+          path: [type: :string, required: true, doc: "path to a *_test.exs file under test/"]
+        ],
+        callback: fn args, _turn -> {:ok, AgentixDemo.RepoTools.run_tests(arg(args, "path"))} end
       )
 
-    calculator =
-      Tool.new(
-        name: "calculator",
-        description: "Evaluate a simple arithmetic expression like '6 * 7'.",
-        executor: :server,
-        callback: fn args, _turn ->
-          expr = args["expression"] || args[:expression] || ""
-          {:ok, AgentixDemo.Calc.eval(expr)}
-        end
-      )
-
-    ask_user =
-      Tool.new(
-        name: "ask_user",
-        description: "Ask the user a clarifying question before continuing.",
-        executor: :human
-      )
-
-    Config.new(model: ModelConfig.model(), tools: [weather, calculator, ask_user])
+    Config.new(
+      model: ModelConfig.model(),
+      system_prompt: @system_prompt,
+      tools: [search, read, run_tests]
+    )
   end
+
+  defp arg(args, key), do: args[key] || args[String.to_existing_atom(key)] || ""
 end

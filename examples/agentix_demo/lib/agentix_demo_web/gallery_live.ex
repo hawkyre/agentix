@@ -49,10 +49,15 @@ defmodule AgentixDemoWeb.GalleryLive do
         </.card>
 
         <.card title="Tool calls" desc="running · ok · error · result inspector">
-          <.tool id="g-r1" name="web_search" status={:running} meta="querying…" />
-          <.tool id="g-r2" name="read_file" status={:ok} meta="412 rows · 38ms" />
-          <.tool id="g-r3" name="get_weather" status={:ok} result="It's 21°C and sunny in Tokyo." />
-          <.tool id="g-r4" name="run_tests" status={:error} meta="2 failed" />
+          <.tool id="g-r1" name="search_code" status={:running} meta="grepping lib/…" />
+          <.tool
+            id="g-r2"
+            name="read_file"
+            status={:ok}
+            result="lib/agentix/hook/pipeline.ex\n\ndefmodule Agentix.Hook.Pipeline do\n  @moduledoc false\n  ..."
+          />
+          <.tool id="g-r3" name="run_tests" status={:ok} result="exit 0\n12 tests, 0 failures" />
+          <.tool id="g-r4" name="run_tests" status={:error} meta="3 failed" />
         </.card>
 
         <.card title="Permission" desc="approval">

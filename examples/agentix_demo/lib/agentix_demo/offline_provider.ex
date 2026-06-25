@@ -5,10 +5,10 @@ defmodule AgentixDemo.OfflineProvider do
   # **no ExUnit dependency**, so it is safe as a runtime provider. Selected by
   # `AgentixDemo.ModelConfig` when `ANTHROPIC_API_KEY` is unset.
   #
-  # It "reasons" out loud (a thinking chunk → streamed to the JS hook), then either streams a
-  # text reply or emits a tool call based on the message: "weather …" → the gated `get_weather`
-  # server tool, a message with digits → the `calculator` server tool, a bare greeting → the
-  # `ask_user` human elicitation. Once a tool result comes back it folds it into a final answer.
+  # It "reasons" out loud (a thinking chunk → streamed to the JS hook), then either emits a
+  # tool call or streams a text reply: a "test/verify" message → the approval-gated `run_tests`
+  # tool, any other question → `search_code`. Once a tool result comes back it folds it into a
+  # final answer. (With a real key the live model drives these same tools far better.)
   @behaviour Agentix.Provider
 
   alias Agentix.Provider
@@ -33,30 +33,25 @@ defmodule AgentixDemo.OfflineProvider do
 
   defp reply_for(text) do
     cond do
-      text =~ ~r/weather/i ->
-        {:tool, "get_weather", %{"city" => city_in(text)},
-         "They're asking about the weather — I'll call get_weather (it needs approval)."}
+      text =~ ~r/\b(run|verify|test|tests)\b/i ->
+        {:tool, "run_tests", %{"path" => "test/agentix/hook_test.exs"},
+         "They want to verify behavior — I'll propose running a test file (needs approval)."}
 
-      expr = arithmetic_in(text) ->
-        {:tool, "calculator", %{"expression" => expr},
-         "This looks like arithmetic — I'll run the calculator tool."}
-
-      text =~ ~r/^\s*(hi|hello|hey)\b/i ->
-        {:tool, "ask_user", %{},
-         "A greeting with no task yet — I'll ask what they'd like help with."}
+      text =~ ~r/[a-z]/i ->
+        {:tool, "search_code", %{"query" => keyword_in(text)},
+         "I'll search the source to ground my answer."}
 
       true ->
         {:text, canned_reply(text), "A normal message — I'll just reply directly."}
     end
   end
 
-  # Pull out an `a op b` expression so "what is 6 * 7" calls the calculator with "6 * 7" — and
-  # plain digits ("I have 2 cats") don't spuriously trigger it.
-  defp arithmetic_in(text) do
-    case Regex.run(~r{-?\d+\s*[-+*/]\s*-?\d+}, text) do
-      [expr] -> expr
-      _ -> nil
-    end
+  # A rough search term for offline mode: the longest word in the message (the real model
+  # picks far better queries).
+  defp keyword_in(text) do
+    text
+    |> String.split(~r/[^A-Za-z_.]+/, trim: true)
+    |> Enum.max_by(&String.length/1, fn -> "hook" end)
   end
 
   defp to_handle({:text, text, thinking}) do
@@ -93,15 +88,8 @@ defmodule AgentixDemo.OfflineProvider do
     do: "Hi! This is the **offline demo provider** — set `ANTHROPIC_API_KEY` for real replies."
 
   defp canned_reply(text) do
-    "You said: *#{text}*.\n\nThis is the **offline demo provider** (no API key set). Try " <>
-      "\"weather in Tokyo\" for an approval-gated tool, or \"6 * 7\" for the calculator."
-  end
-
-  defp city_in(text) do
-    case Regex.run(~r/weather\s+(?:in|for)\s+([A-Za-z][A-Za-z .'-]*)/i, text) do
-      [_, city] -> String.trim(city)
-      _ -> "your area"
-    end
+    "You said: *#{text}*.\n\nThis is the **offline demo provider** (no API key set). Set " <>
+      "`ANTHROPIC_API_KEY` and restart so the real model can search and read the source."
   end
 
   defp tool_result_text(%ReqLLM.Context{messages: messages}) do
