@@ -36,6 +36,8 @@ defmodule Agentix.Provider.ReqLLM do
   alias ReqLLM.Response
   alias ReqLLM.StreamResponse.MetadataHandle
 
+  require Logger
+
   @impl true
   def stream(model, context, opts) do
     # A `:schema` opt switches to structured-output mode (a forced tool call); ReqLLM
@@ -50,12 +52,12 @@ defmodule Agentix.Provider.ReqLLM do
       end
 
     case result do
-      {:ok, stream_response} -> {:ok, build_stream(stream_response, schema != nil)}
+      {:ok, stream_response} -> {:ok, build_stream(stream_response, schema)}
       {:error, _reason} = error -> error
     end
   end
 
-  defp build_stream(stream_response, object?) do
+  defp build_stream(stream_response, schema) do
     # `build_stream/1` runs inside the agent's stream-consuming task (`Agent.run_stream/6`), so
     # `start_link` links the collector to that task. The happy path stops it in `finalize/2`;
     # on cancel/error the agent terminates the task (`Task.Supervisor.terminate_child/2`), which
@@ -72,11 +74,11 @@ defmodule Agentix.Provider.ReqLLM do
     %Provider.Stream{
       chunks: chunks,
       cancel: stream_response.cancel,
-      finalize: fn -> finalize(stream_response, collector, object?) end
+      finalize: fn -> finalize(stream_response, collector, schema) end
     }
   end
 
-  defp finalize(stream_response, collector, object?) do
+  defp finalize(stream_response, collector, schema) do
     collected = Agent.get(collector, &Enum.reverse(&1))
     Agent.stop(collector)
     metadata = MetadataHandle.await(stream_response.metadata_handle)
@@ -88,18 +90,24 @@ defmodule Agentix.Provider.ReqLLM do
         model: stream_response.model
       )
 
-    {maybe_put_object(response, object?), response.usage}
+    {maybe_put_object(response, schema), response.usage}
   end
 
-  # Structured-output turn: extract the parsed object from the already-built response
-  # (via the forced `structured_output` tool call) and stash it in the message metadata.
-  # `unwrap_object/1` reads the response/message — it does not re-consume the stream.
-  defp maybe_put_object(%{message: message}, false), do: message
+  # Structured-output turn (schema set): extract the parsed object from the already-built
+  # response (via the forced `structured_output` tool call) and stash it in the message
+  # metadata. `unwrap_object/1` reads the response/message — it does not re-consume the
+  # stream. A `nil` schema is the plain-text path. An extraction failure is logged (not
+  # silent) and leaves the turn intact with no object.
+  defp maybe_put_object(%{message: message}, nil), do: message
 
-  defp maybe_put_object(%{message: message} = response, true) do
+  defp maybe_put_object(%{message: message} = response, _schema) do
     case Response.unwrap_object(response) do
-      {:ok, object} -> %{message | metadata: Map.put(message.metadata || %{}, "object", object)}
-      {:error, _reason} -> message
+      {:ok, object} ->
+        %{message | metadata: Map.put(message.metadata || %{}, "object", object)}
+
+      {:error, reason} ->
+        Logger.warning("agentix structured-output extraction failed: #{inspect(reason)}")
+        message
     end
   end
 end

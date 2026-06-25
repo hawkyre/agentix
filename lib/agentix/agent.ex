@@ -491,14 +491,14 @@ defmodule Agentix.Agent do
         halt_turn(data, reason)
 
       {:cont, _turn} ->
-        # A structured-output turn is terminal: the object IS the answer, so the tool loop
-        # is skipped even if the message carries tool calls. (ReqLLM models structured output
-        # as a forced single tool, so honoring tool_calls here would double-dispatch.) This
-        # guard must precede the tool_calls branch.
-        cond do
-          data.turn.schema != nil -> finish_turn(data)
-          match?([_ | _], message.tool_calls) -> begin_tool_calls(data, message.tool_calls)
-          true -> finish_turn(data)
+        # Run the tool loop only on an ordinary turn that carries tool calls. A
+        # structured-output turn (schema set) is terminal — the object IS the answer, so the
+        # loop is skipped even if the message has tool calls (ReqLLM models structured output
+        # as a forced tool, which would otherwise double-dispatch).
+        if is_nil(data.turn.schema) and match?([_ | _], message.tool_calls) do
+          begin_tool_calls(data, message.tool_calls)
+        else
+          finish_turn(data)
         end
     end
   end

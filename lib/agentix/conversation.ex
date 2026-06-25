@@ -46,11 +46,36 @@ defmodule Agentix.Conversation do
   """
   @spec send_message(String.t(), message(), Scope.t(), keyword()) :: :ok | {:error, term()}
   def send_message(conversation_id, message, %Scope{} = scope, opts \\ []) do
+    turn_opts = Keyword.take(opts, [:schema])
+    validate_turn_opts!(turn_opts)
+
     with {:ok, _pid} <- ensure_started(conversation_id, opts) do
-      turn_opts = Keyword.take(opts, [:schema])
       :gen_statem.call(Agent.via(conversation_id), {:send_message, message, scope, turn_opts})
     end
   end
+
+  # Validate the per-turn `:schema` at the boundary (the config-level default is validated
+  # in `Config.new/2`; a per-turn override must meet the same bar, plus `false`/`nil` to opt
+  # out). A bad value is a caller error, so raise here rather than crash deep in the provider.
+  defp validate_turn_opts!(turn_opts) do
+    case Keyword.fetch(turn_opts, :schema) do
+      :error -> :ok
+      {:ok, schema} -> validate_schema!(schema)
+    end
+  end
+
+  defp validate_schema!(schema) when schema in [false, nil], do: :ok
+  defp validate_schema!(schema) when is_map(schema) and map_size(schema) > 0, do: :ok
+
+  defp validate_schema!(schema) when is_list(schema) and schema != [] do
+    if Keyword.keyword?(schema), do: :ok, else: raise(ArgumentError, schema_error(schema))
+  end
+
+  defp validate_schema!(schema), do: raise(ArgumentError, schema_error(schema))
+
+  defp schema_error(value),
+    do:
+      ":schema must be false, nil, a non-empty keyword, or a non-empty map, got: #{inspect(value)}"
 
   @doc "Cancels the in-flight turn from any non-idle state. A no-op if not running."
   @spec cancel(String.t()) :: :ok

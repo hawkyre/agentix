@@ -72,6 +72,35 @@ defmodule Agentix.StructuredOutputTest do
     end
   end
 
+  describe "per-turn :schema validation" do
+    test "rejects an invalid schema value at the boundary (raises, no deep crash)", %{id: id} do
+      MockProvider.script(completion("x"))
+      {:ok, _pid} = Conversation.ensure_started(id, config: config())
+
+      assert_raise ArgumentError, ~r/:schema must be/, fn ->
+        Conversation.send_message(id, "hi", Scope.new(), schema: "not a schema")
+      end
+
+      assert_raise ArgumentError, fn ->
+        Conversation.send_message(id, "hi", Scope.new(), schema: 42)
+      end
+
+      assert_raise ArgumentError, fn ->
+        Conversation.send_message(id, "hi", Scope.new(), schema: %{})
+      end
+    end
+
+    test "accepts false and nil as opt-outs without raising", %{id: id} do
+      MockProvider.script([completion("a"), completion("b")])
+      {:ok, _pid} = Conversation.ensure_started(id, config: config())
+
+      assert :ok = Conversation.send_message(id, "hi", Scope.new(), schema: false)
+      assert_receive {:turn_completed, _ref}
+      assert :ok = Conversation.send_message(id, "hi", Scope.new(), schema: nil)
+      assert_receive {:turn_completed, _ref}
+    end
+  end
+
   describe "config response_format default" do
     test "applies when no per-turn :schema is given", %{id: id} do
       MockProvider.script(completion("x", object: %{"k" => 1}))
