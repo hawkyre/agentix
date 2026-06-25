@@ -108,6 +108,12 @@ defmodule Agentix.Conversation.ConfigTest do
       end
     end
 
+    test "an explicit nil field is rejected, not silently healed to the default" do
+      assert_raise ArgumentError, ~r/retry must be false/, fn ->
+        Config.new(model: "m", retry: %{max_attempts: nil, base_ms: 100, max_ms: 500})
+      end
+    end
+
     test "round-trips through a string-keyed JSON map (Ecto revival)" do
       config =
         Config.new(%{

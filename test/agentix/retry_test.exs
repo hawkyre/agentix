@@ -44,13 +44,29 @@ defmodule Agentix.RetryTest do
       assert Retry.retry_after_ms(Request.exception(headers: %{"retry-after" => 3})) == 3_000
     end
 
+    test "handles the real Req shape: a map of name => [values]" do
+      # Req.Response.headers downcases names and wraps each value in a list.
+      assert Retry.retry_after_ms(Request.exception(headers: %{"retry-after" => ["5"]})) == 5_000
+    end
+
+    test "handles a list-of-tuples header form" do
+      headers = [{"content-type", "application/json"}, {"retry-after", "7"}]
+      assert Retry.retry_after_ms(Request.exception(headers: headers)) == 7_000
+    end
+
     test "is case-insensitive on the header name" do
       assert Retry.retry_after_ms(Request.exception(headers: %{"Retry-After" => "1"})) == 1_000
+      assert Retry.retry_after_ms(Request.exception(headers: %{"RETRY-AFTER" => ["2"]})) == 2_000
+    end
+
+    test "rejects a value with trailing garbage (not read as a number)" do
+      assert Retry.retry_after_ms(Request.exception(headers: %{"retry-after" => "30abc"})) == nil
     end
 
     test "nil when absent, unparseable, or not a Request" do
       assert Retry.retry_after_ms(Request.exception(headers: %{})) == nil
       assert Retry.retry_after_ms(Request.exception(headers: %{"retry-after" => "soon"})) == nil
+      assert Retry.retry_after_ms(Request.exception(headers: %{"retry-after" => []})) == nil
       assert Retry.retry_after_ms(:boom) == nil
     end
   end
@@ -82,6 +98,11 @@ defmodule Agentix.RetryTest do
       # attempt 6 caps at 2000; a 1ms server hint can't shrink it.
       assert Retry.delay(6, @policy, 1) <= 2_000
       assert Retry.delay(6, @policy, 1) >= 1_000
+    end
+
+    test "caps a hostile/huge retry-after at the absolute ceiling" do
+      # A malicious server asking for ~28 hours must not pin the task asleep.
+      assert Retry.delay(1, @policy, 99_999_999) <= 60_000
     end
   end
 end

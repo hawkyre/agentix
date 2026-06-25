@@ -78,7 +78,8 @@ defmodule Agentix.Test do
   @spec error(pos_integer(), keyword()) :: map()
   def error(status, opts \\ []) when is_integer(status) do
     retry_after = Keyword.get(opts, :retry_after)
-    headers = if retry_after, do: %{"retry-after" => to_string(retry_after)}, else: %{}
+    # Mirror Req.Response.headers: a case-insensitive map of name => [values].
+    headers = if retry_after, do: %{"retry-after" => [to_string(retry_after)]}, else: %{}
 
     reason =
       Request.exception(

@@ -994,7 +994,9 @@ defmodule Agentix.Agent do
   ## Streaming task (runs under Agentix.TaskSupervisor)
 
   defp run_stream(agent, turn_ref, model, context, opts, transformer, retry, conversation_id) do
-    case open_stream(model, context, opts, retry, turn_ref, conversation_id) do
+    {policy, max_attempts} = retry_plan(retry)
+
+    case attempt_stream(model, context, opts, policy, turn_ref, conversation_id, 1, max_attempts) do
       {:ok, stream} ->
         send(agent, {:stream_started, turn_ref, stream.cancel})
 
@@ -1015,19 +1017,24 @@ defmodule Agentix.Agent do
   end
 
   # Open the provider stream, retrying the *pre-stream* call on a transient error per the
-  # conversation's `retry` policy. `false` (or `max_attempts: 1`) means a single attempt.
-  defp open_stream(model, context, opts, retry, turn_ref, conversation_id) do
-    attempt_stream(model, context, opts, retry, turn_ref, conversation_id, 1, max_attempts(retry))
-  end
-
-  defp attempt_stream(model, context, opts, retry, turn_ref, conversation_id, attempt, max_attempts) do
+  # resolved `policy` map. `attempt` is 1-based; `max_attempts` of 1 means a single try.
+  defp attempt_stream(
+         model,
+         context,
+         opts,
+         policy,
+         turn_ref,
+         conversation_id,
+         attempt,
+         max_attempts
+       ) do
     case Provider.stream(model, context, opts) do
       {:ok, stream} ->
         {:ok, stream}
 
       {:error, reason} ->
         if attempt < max_attempts and Agentix.Retry.retryable?(reason) do
-          delay = Agentix.Retry.delay(attempt, retry, Agentix.Retry.retry_after_ms(reason))
+          delay = Agentix.Retry.delay(attempt, policy, Agentix.Retry.retry_after_ms(reason))
 
           :telemetry.execute(
             [:agentix, :turn, :retry],
@@ -1041,7 +1048,7 @@ defmodule Agentix.Agent do
             model,
             context,
             opts,
-            retry,
+            policy,
             turn_ref,
             conversation_id,
             attempt + 1,
@@ -1053,8 +1060,11 @@ defmodule Agentix.Agent do
     end
   end
 
-  defp max_attempts(false), do: 1
-  defp max_attempts(%{max_attempts: n}) when is_integer(n) and n > 0, do: n
+  # Resolve the config `retry` value into `{policy_map, max_attempts}`. `false` disables
+  # retry: max_attempts is 1, so the policy map is inert (never reaches `delay/3`), but it
+  # stays a well-typed map so the call site has no `false`-shaped union.
+  defp retry_plan(false), do: {%{base_ms: 1, max_ms: 1}, 1}
+  defp retry_plan(%{max_attempts: n} = policy) when is_integer(n) and n > 0, do: {policy, n}
 
   defp handle_chunk(%{type: :content, text: text}, data) when is_binary(text) do
     turn = data.turn

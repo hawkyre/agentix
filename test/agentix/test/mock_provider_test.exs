@@ -107,7 +107,7 @@ defmodule Agentix.Test.MockProviderTest do
     test "a 429 error carries retry-after in the headers" do
       MockProvider.script(error(429, retry_after: 2))
 
-      assert {:error, %Request{status: 429, headers: %{"retry-after" => "2"}}} =
+      assert {:error, %Request{status: 429, headers: %{"retry-after" => ["2"]}}} =
                Provider.stream("mock:m", Context.new([]), [])
     end
 

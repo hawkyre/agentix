@@ -161,13 +161,19 @@ defmodule Agentix.Conversation.Config do
   defp normalize_retry(%{retry: false} = attrs), do: attrs
 
   defp normalize_retry(%{retry: %{} = retry} = attrs) do
+    # Read either the string key (JSON revival) or the atom key, falling back to the
+    # default only when *absent* — an explicit `nil` is preserved so `validate_retry!`
+    # rejects it rather than silently healing to the default.
+    get = fn key, default ->
+      Map.get(retry, Atom.to_string(key), Map.get(retry, key, default))
+    end
+
     %{
       attrs
       | retry: %{
-          max_attempts:
-            retry["max_attempts"] || retry[:max_attempts] || @default_retry.max_attempts,
-          base_ms: retry["base_ms"] || retry[:base_ms] || @default_retry.base_ms,
-          max_ms: retry["max_ms"] || retry[:max_ms] || @default_retry.max_ms
+          max_attempts: get.(:max_attempts, @default_retry.max_attempts),
+          base_ms: get.(:base_ms, @default_retry.base_ms),
+          max_ms: get.(:max_ms, @default_retry.max_ms)
         }
     }
   end
