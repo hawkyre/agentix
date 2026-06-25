@@ -19,6 +19,7 @@ defmodule AgentixDemo.OfflineProvider do
     chunks =
       reply
       |> String.split(~r/(?<= )/)
+      |> Enum.reject(&(&1 == ""))
       |> Enum.map(&StreamChunk.text/1)
 
     message = %Message{role: :assistant, content: [ContentPart.text(reply)]}
@@ -52,18 +53,18 @@ defmodule AgentixDemo.OfflineProvider do
     end)
   end
 
+  defp text_of(text) when is_binary(text), do: if(text == "", do: nil, else: text)
+
   defp text_of(parts) when is_list(parts) do
-    parts
-    |> Enum.map(fn
-      %{text: t} when is_binary(t) -> t
-      _ -> nil
-    end)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join()
-    |> case do
-      "" -> nil
-      joined -> joined
-    end
+    joined =
+      parts
+      |> Enum.flat_map(fn
+        %{text: t} when is_binary(t) -> [t]
+        _ -> []
+      end)
+      |> Enum.join()
+
+    if joined == "", do: nil, else: joined
   end
 
   defp text_of(_), do: nil

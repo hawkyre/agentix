@@ -2,7 +2,10 @@ defmodule AgentixDemo.ModelConfig do
   @moduledoc false
   # Picks the provider + model from the environment: real Claude when `ANTHROPIC_API_KEY` is
   # set, the key-free `AgentixDemo.OfflineProvider` otherwise. Pure functions so the selection
-  # is unit-testable without booting the app (config/runtime.exs calls `provider/0`).
+  # is unit-testable without booting the app.
+  #
+  # config/runtime.exs inlines the same rule with bare module atoms (not a call to provider/1),
+  # because app code is not guaranteed loaded when runtime config is evaluated — keep them in sync.
 
   @model "anthropic:claude-haiku-4-5"
 

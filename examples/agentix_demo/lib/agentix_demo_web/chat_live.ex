@@ -115,6 +115,9 @@ defmodule AgentixDemoWeb.ChatLive do
   def handle_event("theme-restored", %{"theme" => theme}, socket) when theme in ["light", "dark"],
     do: {:noreply, assign(socket, :theme, theme)}
 
+  # Ignore any out-of-range value (corrupt localStorage / a direct socket message) — never crash.
+  def handle_event("theme-restored", _params, socket), do: {:noreply, socket}
+
   defp config do
     ask_user =
       Tool.new(
