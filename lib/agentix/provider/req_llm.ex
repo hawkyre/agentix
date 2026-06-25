@@ -36,6 +36,11 @@ defmodule Agentix.Provider.ReqLLM do
   end
 
   defp build_stream(stream_response) do
+    # `build_stream/1` runs inside the agent's stream-consuming task (`Agent.run_stream/6`), so
+    # `start_link` links the collector to that task. The happy path stops it in `finalize/2`;
+    # on cancel/error the agent terminates the task (`Task.Supervisor.terminate_child/2`), which
+    # takes the linked collector down too — so it's never orphaned. Keep this caller a process
+    # whose death should reap the collector, or stop it explicitly if that ever changes.
     {:ok, collector} = Agent.start_link(fn -> [] end)
 
     chunks =
