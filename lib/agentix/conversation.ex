@@ -36,11 +36,19 @@ defmodule Agentix.Conversation do
   Sends a user `message` to the conversation under `scope`, starting the agent if
   needed (pass `config:` in `opts` for a new conversation). Returns `:ok` once the
   turn is accepted, or `{:error, :busy}` if a turn is already in flight.
+
+  Per-turn `opts`:
+
+    * `:schema` — structured output for this turn only. A NimbleOptions keyword or a
+      JSON Schema map makes the model return a conforming object (surfaced via
+      `Agentix.object/1`); `false` opts out of the conversation's `response_format`
+      default for this one turn. Omitting it uses that default (or plain text).
   """
   @spec send_message(String.t(), message(), Scope.t(), keyword()) :: :ok | {:error, term()}
   def send_message(conversation_id, message, %Scope{} = scope, opts \\ []) do
     with {:ok, _pid} <- ensure_started(conversation_id, opts) do
-      :gen_statem.call(Agent.via(conversation_id), {:send_message, message, scope})
+      turn_opts = Keyword.take(opts, [:schema])
+      :gen_statem.call(Agent.via(conversation_id), {:send_message, message, scope, turn_opts})
     end
   end
 

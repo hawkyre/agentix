@@ -175,8 +175,8 @@ defmodule Agentix.Agent do
 
   ## State: idle
 
-  def idle({:call, from}, {:send_message, message, scope}, data) do
-    start_turn(message, scope, data, from)
+  def idle({:call, from}, {:send_message, message, scope, turn_opts}, data) do
+    start_turn(message, scope, turn_opts, data, from)
   end
 
   def idle({:call, from}, :cancel, _data) do
@@ -184,9 +184,10 @@ defmodule Agentix.Agent do
   end
 
   # Recovery rerun: the user message is already in the log (only the LLM dispatch
-  # was lost), so we re-launch the turn without re-appending it.
+  # was lost), so we re-launch the turn without re-appending it. A per-turn `:schema`
+  # override is not persisted, so recovery falls back to the config default (`[]` opts).
   def idle(:internal, {:rerun, scope}, data) do
-    launch_turn(scope, data, nil)
+    launch_turn(scope, [], data, nil)
   end
 
   def idle(event_type, event, data), do: handle_common(:idle, event_type, event, data)
@@ -207,7 +208,7 @@ defmodule Agentix.Agent do
     end
   end
 
-  def preparing({:call, from}, {:send_message, _m, _s}, _data) do
+  def preparing({:call, from}, {:send_message, _m, _s, _o}, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
   end
 
@@ -247,7 +248,7 @@ defmodule Agentix.Agent do
     end
   end
 
-  def streaming({:call, from}, {:send_message, _m, _s}, _data) do
+  def streaming({:call, from}, {:send_message, _m, _s, _o}, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
   end
 
@@ -276,7 +277,7 @@ defmodule Agentix.Agent do
     handle_resolve(data, from, id, result, scope, :executing_tools)
   end
 
-  def executing_tools({:call, from}, {:send_message, _m, _s}, _data) do
+  def executing_tools({:call, from}, {:send_message, _m, _s, _o}, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
   end
 
@@ -306,7 +307,7 @@ defmodule Agentix.Agent do
     tool_task_down(data, mref, reason, :awaiting_input)
   end
 
-  def awaiting_input({:call, from}, {:send_message, _m, _s}, _data) do
+  def awaiting_input({:call, from}, {:send_message, _m, _s, _o}, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
   end
 
@@ -374,13 +375,14 @@ defmodule Agentix.Agent do
 
   # A fresh user message: append it to the log, then launch the turn. The turn
   # assembles its context by reading the log, so the message is not threaded further.
-  defp start_turn(message, scope, data, from) do
+  defp start_turn(message, scope, turn_opts, data, from) do
     {:ok, seq} = append_event(data, :user_msg, message_content(normalize_user_message(message)))
-    launch_turn(scope, %{data | last_seq: seq}, from)
+    launch_turn(scope, turn_opts, %{data | last_seq: seq}, from)
   end
 
-  defp launch_turn(scope, data, from) do
-    data = %{data | turn: base_turn(scope)}
+  defp launch_turn(scope, turn_opts, data, from) do
+    schema = effective_schema(turn_opts, data.config)
+    data = %{data | turn: base_turn(scope, schema)}
     Publisher.turn_started(data.publisher, data.turn.ref)
     Publisher.state_changed(data.publisher, :preparing)
 
@@ -388,14 +390,28 @@ defmodule Agentix.Agent do
     {:next_state, :preparing, data, reply ++ [{:next_event, :internal, :assemble}]}
   end
 
+  # The schema in force for this turn: a per-turn `:schema` opt wins; `false` opts out of
+  # the conversation's `response_format` default for one turn; `:unset` (no opt) uses it.
+  defp effective_schema(turn_opts, %Config{response_format: default}) do
+    case Keyword.get(turn_opts, :schema, :unset) do
+      :unset -> default
+      false -> nil
+      schema -> schema
+    end
+  end
+
   # A fresh turn's in-memory state. `ref` keys this turn's tool tasks/events; `calls` and
   # `task_index` track in-flight tool calls. (`continue_turn/1` keeps the same `ref` for a
   # tool loop; `revive_awaiting/2` rebuilds this with a restored `calls` map.)
-  defp base_turn(scope) do
+  defp base_turn(scope, schema) do
     %{
       ref: make_ref(),
       msg_id: new_msg_id(),
       scope: scope,
+      # Effective output schema for this turn (nil = plain text). When set, the turn is
+      # terminal (structured output is the answer — no tool loop) and the schema is passed
+      # to the provider via `stream_opts/2`.
+      schema: schema,
       task_pid: nil,
       monitor_ref: nil,
       cancel: nil,
@@ -421,7 +437,7 @@ defmodule Agentix.Agent do
     # Tools are handed to the provider for schema/serialization; the loop dispatches
     # them itself (the provider never auto-executes). Other opts (temperature,
     # max_tokens, pool config) are derived from config in a later increment.
-    opts = stream_opts(data.config)
+    opts = stream_opts(data.config, turn.schema)
     transformer = data.config.stream_transformer
     retry = data.config.retry
     conversation_id = data.conversation_id
@@ -475,9 +491,14 @@ defmodule Agentix.Agent do
         halt_turn(data, reason)
 
       {:cont, _turn} ->
-        case message.tool_calls do
-          [_ | _] = tool_calls -> begin_tool_calls(data, tool_calls)
-          _ -> finish_turn(data)
+        # A structured-output turn is terminal: the object IS the answer, so the tool loop
+        # is skipped even if the message carries tool calls. (ReqLLM models structured output
+        # as a forced single tool, so honoring tool_calls here would double-dispatch.) This
+        # guard must precede the tool_calls branch.
+        cond do
+          data.turn.schema != nil -> finish_turn(data)
+          match?([_ | _], message.tool_calls) -> begin_tool_calls(data, message.tool_calls)
+          true -> finish_turn(data)
         end
     end
   end
@@ -808,9 +829,10 @@ defmodule Agentix.Agent do
   # the *same* turn (a tool loop is several model calls per turn, not a new turn).
   defp continue_turn(data) do
     # A blank turn that keeps the loop's `ref` (so this turn's tool tasks/events stay keyed
-    # to it) but gets a fresh `msg_id` and zeroed accumulators. Derived from `base_turn/1`
-    # so any new turn field stays in sync automatically.
-    turn = %{base_turn(data.turn.scope) | ref: data.turn.ref}
+    # to it) but gets a fresh `msg_id` and zeroed accumulators. Derived from `base_turn/2`
+    # so any new turn field stays in sync automatically; the schema carries over (nil in
+    # practice — a schema turn is terminal and never reaches a tool-result continuation).
+    turn = %{base_turn(data.turn.scope, data.turn.schema) | ref: data.turn.ref}
 
     Publisher.state_changed(data.publisher, :preparing)
     {:next_state, :preparing, %{data | turn: turn}, [{:next_event, :internal, :assemble}]}
@@ -1290,9 +1312,15 @@ defmodule Agentix.Agent do
   defp tool_result_status(%{"ok" => true}), do: :ok
   defp tool_result_status(_result), do: :error
 
-  # Provider opts: hand the tool schemas through (the loop dispatches them itself).
-  defp stream_opts(%Config{tools: []}), do: []
-  defp stream_opts(%Config{tools: tools}), do: [tools: Tool.to_reqllm(tools)]
+  # Provider opts: hand the tool schemas through (the loop dispatches them itself), plus an
+  # optional structured-output `:schema` for this turn (the provider branches to object mode).
+  defp stream_opts(config, schema), do: tool_opts(config) ++ schema_opts(schema)
+
+  defp tool_opts(%Config{tools: []}), do: []
+  defp tool_opts(%Config{tools: tools}), do: [tools: Tool.to_reqllm(tools)]
+
+  defp schema_opts(nil), do: []
+  defp schema_opts(schema), do: [schema: schema]
 
   ## Recovery
 
@@ -1371,7 +1399,8 @@ defmodule Agentix.Agent do
   defp revive_awaiting(data, pending) do
     cached = fsm_pending(data.conversation_id)
     # Set the turn first so `arm_timeout/2` can key the re-armed timer on its `ref`.
-    data = %{data | turn: base_turn(Scope.system())}
+    # A revived awaiting turn is a tool-loop continuation, so it carries no schema.
+    data = %{data | turn: base_turn(Scope.system(), nil)}
 
     calls =
       Map.new(pending, fn call ->
