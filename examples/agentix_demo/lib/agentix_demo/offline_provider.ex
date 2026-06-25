@@ -22,8 +22,8 @@ defmodule AgentixDemo.OfflineProvider do
 
   defp decide(%ReqLLM.Context{} = context) do
     cond do
-      tool_result_text(context) ->
-        {:text, "Here's what I found: #{tool_result_text(context)}",
+      result = tool_result_text(context) ->
+        {:text, "Here's what I found: #{result}",
          "A tool result came back — I'll fold it into a final answer."}
 
       true ->
@@ -37,8 +37,8 @@ defmodule AgentixDemo.OfflineProvider do
         {:tool, "get_weather", %{"city" => city_in(text)},
          "They're asking about the weather — I'll call get_weather (it needs approval)."}
 
-      text =~ ~r/\d/ ->
-        {:tool, "calculator", %{"expression" => text},
+      expr = arithmetic_in(text) ->
+        {:tool, "calculator", %{"expression" => expr},
          "This looks like arithmetic — I'll run the calculator tool."}
 
       text =~ ~r/^\s*(hi|hello|hey)\b/i ->
@@ -47,6 +47,15 @@ defmodule AgentixDemo.OfflineProvider do
 
       true ->
         {:text, canned_reply(text), "A normal message — I'll just reply directly."}
+    end
+  end
+
+  # Pull out an `a op b` expression so "what is 6 * 7" calls the calculator with "6 * 7" — and
+  # plain digits ("I have 2 cats") don't spuriously trigger it.
+  defp arithmetic_in(text) do
+    case Regex.run(~r{-?\d+\s*[-+*/]\s*-?\d+}, text) do
+      [expr] -> expr
+      _ -> nil
     end
   end
 

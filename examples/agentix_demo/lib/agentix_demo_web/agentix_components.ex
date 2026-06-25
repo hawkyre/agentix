@@ -204,7 +204,7 @@
           class="border-t border-neutral-200/70 dark:border-neutral-800/70"
         >
           <summary class="cursor-pointer list-none px-3 py-1.5 text-[12px] text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300">
-            Result
+            {if @status == :error, do: "Error", else: "Result"}
           </summary>
           <pre class="overflow-x-auto whitespace-pre-wrap break-words px-3 pb-2.5 text-[12px] leading-relaxed text-neutral-600 dark:text-neutral-300">{@result}</pre>
         </details>
