@@ -59,7 +59,7 @@ defmodule Agentix.AgentRetryTest do
   def forward_retry(_event, measurements, metadata, test_pid),
     do: send(test_pid, {:retry_telemetry, measurements, metadata})
 
-  defp config(opts \\ []), do: Config.new(Keyword.merge([model: "mock:test"], opts))
+  defp config(opts), do: Config.new(Keyword.merge([model: "mock:test"], opts))
 
   test "retries a transient 5xx then completes the turn", %{id: id} do
     MockProvider.script([error(503), error(503), completion("recovered")])

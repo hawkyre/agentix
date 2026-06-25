@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-25
+
+### Added
+
+- **Provider retry & backoff** — a per-conversation `retry` policy on
+  `Agentix.Conversation.Config` (`%{max_attempts, base_ms, max_ms}` or `false`).
+  Transient pre-stream failures (HTTP 429, 5xx, connection drops) are retried with
+  exponential backoff + jitter, honoring a `retry-after` header (capped at 60s); 4xx
+  and unrecognized errors fail fast. A failure after the first streamed token is never
+  retried. Classification/backoff live in the new public `Agentix.Retry`. Each retry
+  emits a `[:agentix, :turn, :retry]` telemetry event.
+- **Structured output** — make the model return typed data conforming to a schema.
+  Pass `schema:` to `Agentix.Conversation.send_message/4` (one-shot) or set
+  `response_format` on the config (default); `schema: false` opts out per turn. The
+  parsed object is surfaced via `Agentix.object/1` and the `Agentix.Chat` `:last_object`
+  assign, and persisted in the assistant message's `metadata["object"]` (no migration).
+  A schema turn is terminal (the tool loop is skipped). `Agentix.Provider.ReqLLM`
+  branches to `ReqLLM.stream_object/4`.
+- `Agentix.Test.error/2`, `Agentix.Test.transport_error/1`, and a `:object` option on
+  `Agentix.Test.completion/2` for driving retry and structured-output scenarios with the
+  mock provider.
+- New guide: **Reliability & structured output**.
+
 ## [0.1.0] - 2026-06-25
 
 First public release.
@@ -47,5 +70,6 @@ First public release.
 - Modern tooling: Credo, Dialyxir, Styler, ExCoveralls, MixAudit, ExDoc, and a
   `mix check` quality gate.
 
-[Unreleased]: https://github.com/hawkyre/agentix/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/hawkyre/agentix/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/hawkyre/agentix/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hawkyre/agentix/releases/tag/v0.1.0
