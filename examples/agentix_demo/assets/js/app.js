@@ -17,9 +17,24 @@ configureMarkdown((raw) => DOMPurify.sanitize(marked.parse(raw)))
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 
+// Server-side theme toggle: ChatLive fires `toggle_theme` and pushes `set-theme` back here.
+// On connect we report the persisted choice so the server's toggle state matches the page.
+const Theme = {
+  mounted() {
+    const saved = localStorage.getItem("agentix-theme") === "dark" ? "dark" : "light"
+    this.apply(saved)
+    this.pushEvent("theme-restored", { theme: saved })
+    this.handleEvent("set-theme", ({ theme }) => this.apply(theme))
+  },
+  apply(theme) {
+    document.documentElement.classList.toggle("dark", theme === "dark")
+    localStorage.setItem("agentix-theme", theme)
+  },
+}
+
 const liveSocket = new LiveSocket("/live", Socket, {
   params: { _csrf_token: csrfToken },
-  hooks: { AgentixStream, AgentixComposer, AgentixMarkdown },
+  hooks: { AgentixStream, AgentixComposer, AgentixMarkdown, Theme },
 })
 
 liveSocket.connect()

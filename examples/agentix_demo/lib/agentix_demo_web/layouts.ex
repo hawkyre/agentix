@@ -16,20 +16,20 @@ defmodule AgentixDemoWeb.Layouts do
         <script src="https://cdn.tailwindcss.com">
         </script>
         <script>
-          // The Agentix components are built for class-based dark mode. Without this the CDN
-          // defaults to `media` (OS) dark mode, so the components' `dark:` styles would fire
-          // on a dark-OS machine while the page stays light. No `.dark` class is ever set, so
-          // the demo renders consistently light. (Add a toggle that flips `.dark` for dark mode.)
+          // Agentix components use class-based dark mode (`.dark` on <html>), not the CDN's
+          // `media` default. The Theme JS hook toggles the class; this restores it from
+          // localStorage before paint so a dark-mode reload doesn't flash light.
           tailwind.config = {darkMode: "class"}
+          if (localStorage.getItem("agentix-theme") === "dark") {
+            document.documentElement.classList.add("dark")
+          }
         </script>
         <script defer src="/assets/app.js">
         </script>
         {Phoenix.HTML.raw("<style>" <> AgentixDemoWeb.AgentixComponents.css() <> "</style>")}
       </head>
-      <body class="bg-neutral-50 text-neutral-900 antialiased">
-        <main class="mx-auto max-w-3xl px-5">
-          {@inner_content}
-        </main>
+      <body class="bg-neutral-50 text-neutral-900 antialiased dark:bg-neutral-950 dark:text-neutral-100">
+        {@inner_content}
       </body>
     </html>
     """

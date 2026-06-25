@@ -14,6 +14,9 @@ defmodule AgentixDemoWeb.Router do
   scope "/", AgentixDemoWeb do
     pipe_through(:browser)
 
-    live("/", ChatLive)
+    # `/` mints a fresh conversation id and redirects to `/c/:id` so a page reload keeps the
+    # same conversation (its history is reloaded from Postgres on mount).
+    live("/", ChatLive, :new)
+    live("/c/:id", ChatLive, :show)
   end
 end
