@@ -46,4 +46,25 @@ defmodule Agentix.Provider.ReqLLMTest do
     assert_receive {:cancelled, _ref}, 30_000
     assert_receive {:state_changed, :idle}, 30_000
   end
+
+  test "structured output returns a schema-conforming object in metadata", %{id: id} do
+    config = Config.new(model: "anthropic:claude-haiku-4-5")
+    {:ok, _pid} = Conversation.ensure_started(id, config: config)
+
+    schema = [
+      sentiment: [type: :string, required: true, doc: "positive, negative, or neutral"],
+      score: [type: :float, required: true, doc: "confidence 0..1"]
+    ]
+
+    # The already-assembled %ReqLLM.Context{} flows in as `messages` — must not raise on
+    # normalization in stream_object/4.
+    :ok = Conversation.send_message(id, "I love this library!", Scope.new(), schema: schema)
+
+    assert_receive {:message_completed, _ref, %ReqLLM.Message{} = message}, 30_000
+    assert_receive {:turn_completed, _ref}, 30_000
+
+    object = Agentix.object(message)
+    assert is_map(object)
+    assert Map.has_key?(object, "sentiment") or Map.has_key?(object, :sentiment)
+  end
 end
