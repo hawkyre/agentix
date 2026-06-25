@@ -20,6 +20,16 @@ defmodule Agentix.Conversation.Config do
       exceeds it is shut down and recorded as a crashed (skipped) injector. Sequential
       hooks run inline and are the author's responsibility to keep bounded.
     * `audit?` — record `model_calls` for replay/evals (off by default).
+    * `retry` — transient-failure retry policy for the **pre-stream** provider call
+      (`%{max_attempts: pos_integer, base_ms: pos_integer, max_ms: pos_integer}`, or
+      `false` to disable). Exponential backoff with jitter, honoring `retry-after`;
+      retried error classes are connection drops, HTTP 429, and HTTP 5xx. A failure
+      after the first streamed chunk is never retried (no duplicate output). `false`
+      and `%{max_attempts: 1}` are equivalent — one attempt, no retry.
+    * `response_format` — default output schema applied to every turn that does not
+      pass a per-turn `:schema` (`nil` = plain text; a NimbleOptions keyword or a JSON
+      Schema map otherwise). A per-turn `schema: false` opts out of this default for
+      one turn.
     * `hooks` — `Agentix.Hook` structs run around each model call.
     * `stream_transformer` — a `(chunk -> chunk)` seam applied to each stream chunk
       (`nil` is the identity default).
@@ -43,6 +53,9 @@ defmodule Agentix.Conversation.Config do
           default_timeout: pos_integer(),
           hook_timeout: pos_integer(),
           audit?: boolean(),
+          retry:
+            %{max_attempts: pos_integer(), base_ms: pos_integer(), max_ms: pos_integer()} | false,
+          response_format: keyword() | map() | nil,
           persistence: module() | {module(), keyword()} | nil,
           notifier: module() | nil,
           pubsub: atom() | nil
@@ -60,6 +73,8 @@ defmodule Agentix.Conversation.Config do
   @default_timeout_ms 300_000
   # Default per parallel pre-hook deadline, in milliseconds.
   @default_hook_timeout_ms 5_000
+  # Default retry policy: 3 attempts, exponential backoff 500ms → capped at 8s.
+  @default_retry %{max_attempts: 3, base_ms: 500, max_ms: 8_000}
 
   @enforce_keys [:model]
   defstruct [
@@ -75,6 +90,8 @@ defmodule Agentix.Conversation.Config do
     default_timeout: @default_timeout_ms,
     hook_timeout: @default_hook_timeout_ms,
     audit?: false,
+    retry: @default_retry,
+    response_format: nil,
     persistence: nil,
     notifier: nil,
     pubsub: nil
@@ -90,12 +107,12 @@ defmodule Agentix.Conversation.Config do
   """
   @config_fields ~w(model system_prompt tools hooks stream_transformer working_budget
                     injection_reserve tool_retention compaction_window default_timeout
-                    hook_timeout audit? persistence notifier pubsub)a
+                    hook_timeout audit? retry response_format persistence notifier pubsub)a
   @field_strings Map.new(@config_fields, &{Atom.to_string(&1), &1})
 
   @spec new(keyword() | map()) :: t()
   def new(attrs) do
-    attrs = attrs |> Map.new() |> atomize_known_keys() |> normalize_retention()
+    attrs = attrs |> Map.new() |> atomize_known_keys() |> normalize_retention() |> normalize_retry()
     validate_model!(Map.get(attrs, :model))
 
     config = struct!(__MODULE__, attrs)
@@ -106,6 +123,8 @@ defmodule Agentix.Conversation.Config do
     validate_positive!(:hook_timeout, config.hook_timeout)
     validate_retention!(config.tool_retention)
     validate_transformer!(config.stream_transformer)
+    validate_retry!(config.retry)
+    validate_response_format!(config.response_format)
     config
   end
 
@@ -135,6 +154,25 @@ defmodule Agentix.Conversation.Config do
   end
 
   defp normalize_retention(attrs), do: attrs
+
+  # `retry` is `false` or a fixed-shape int map; a JSON round-trip (Ecto) makes its keys
+  # strings. Rebuild it atom-keyed, merging partial maps with the default so callers may
+  # pass just the fields they want to override. Idempotent for the atom-keyed forms.
+  defp normalize_retry(%{retry: false} = attrs), do: attrs
+
+  defp normalize_retry(%{retry: %{} = retry} = attrs) do
+    %{
+      attrs
+      | retry: %{
+          max_attempts:
+            retry["max_attempts"] || retry[:max_attempts] || @default_retry.max_attempts,
+          base_ms: retry["base_ms"] || retry[:base_ms] || @default_retry.base_ms,
+          max_ms: retry["max_ms"] || retry[:max_ms] || @default_retry.max_ms
+        }
+    }
+  end
+
+  defp normalize_retry(attrs), do: attrs
 
   defp atomize(value) when is_binary(value), do: String.to_existing_atom(value)
   defp atomize(value), do: value
@@ -167,6 +205,40 @@ defmodule Agentix.Conversation.Config do
   defp validate_transformer!(other) do
     raise ArgumentError,
           "stream_transformer must be nil or a 1-arity (chunk -> chunk) function, " <>
+            "got: #{inspect(other)}"
+  end
+
+  # `false` disables retry (equivalent to max_attempts: 1). Otherwise all three knobs
+  # must be positive ints, with max_ms ≥ base_ms (the cap can't sit below the base delay).
+  defp validate_retry!(false), do: :ok
+
+  defp validate_retry!(%{max_attempts: a, base_ms: b, max_ms: m})
+       when is_integer(a) and a > 0 and is_integer(b) and b > 0 and is_integer(m) and m >= b,
+       do: :ok
+
+  defp validate_retry!(other) do
+    raise ArgumentError,
+          "retry must be false or %{max_attempts: pos_integer, base_ms: pos_integer, " <>
+            "max_ms: pos_integer (>= base_ms)}, got: #{inspect(other)}"
+  end
+
+  # `nil` = plain text (no structured output). Otherwise a non-empty NimbleOptions keyword
+  # or a JSON Schema map; the schema content itself is opaque here (validated by the provider).
+  defp validate_response_format!(nil), do: :ok
+  defp validate_response_format!(format) when is_map(format) and map_size(format) > 0, do: :ok
+
+  defp validate_response_format!(format) when is_list(format) and format != [] do
+    if Keyword.keyword?(format) do
+      :ok
+    else
+      raise ArgumentError,
+            "response_format list must be a NimbleOptions keyword, got: #{inspect(format)}"
+    end
+  end
+
+  defp validate_response_format!(other) do
+    raise ArgumentError,
+          "response_format must be nil, a non-empty keyword, or a non-empty map, " <>
             "got: #{inspect(other)}"
   end
 end
