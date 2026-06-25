@@ -119,6 +119,33 @@ defmodule AgentixDemoWeb.ChatLive do
   def handle_event("theme-restored", _params, socket), do: {:noreply, socket}
 
   defp config do
+    # Three executors so the demo exercises every tool path:
+    #   * :server + :requires_approval  → runs your code, but gated behind approve/deny
+    #   * :server (non-gated)           → runs your code inline
+    #   * :human                        → suspends for a person's answer (elicitation)
+    weather =
+      Tool.new(
+        name: "get_weather",
+        description: "Look up the current weather for a city. Requires approval.",
+        executor: :server,
+        approval: :requires_approval,
+        callback: fn args, _turn ->
+          city = args["city"] || args[:city] || "your area"
+          {:ok, "It's 21°C and sunny in #{city}."}
+        end
+      )
+
+    calculator =
+      Tool.new(
+        name: "calculator",
+        description: "Evaluate a simple arithmetic expression like '6 * 7'.",
+        executor: :server,
+        callback: fn args, _turn ->
+          expr = args["expression"] || args[:expression] || ""
+          {:ok, AgentixDemo.Calc.eval(expr)}
+        end
+      )
+
     ask_user =
       Tool.new(
         name: "ask_user",
@@ -126,6 +153,6 @@ defmodule AgentixDemoWeb.ChatLive do
         executor: :human
       )
 
-    Config.new(model: ModelConfig.model(), tools: [ask_user])
+    Config.new(model: ModelConfig.model(), tools: [weather, calculator, ask_user])
   end
 end

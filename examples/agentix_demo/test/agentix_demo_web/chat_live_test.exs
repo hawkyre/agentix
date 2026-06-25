@@ -11,13 +11,31 @@ defmodule AgentixDemoWeb.ChatLiveTest do
 
   @endpoint AgentixDemoWeb.Endpoint
 
-  setup do
-    # Shared-mode sandbox: the conversation agent and the LiveView run in their own
-    # processes but must see the test's transaction (async: false makes this safe).
-    :ok = Ecto.Adapters.SQL.Sandbox.checkout(AgentixDemo.Repo)
-    Ecto.Adapters.SQL.Sandbox.mode(AgentixDemo.Repo, {:shared, self()})
+  # The test process and the LiveView each receive PubSub events independently, so after a
+  # turn completes the LiveView may not have applied `message_completed` to its stream the
+  # instant we render. Poll render briefly until the expected text appears.
+  defp render_until(live, text, tries \\ 100) do
+    html = render(live)
 
+    cond do
+      html =~ text -> html
+      tries == 0 -> flunk("never rendered #{inspect(text)}.\n\n#{html}")
+      true -> Process.sleep(10) && render_until(live, text, tries - 1)
+    end
+  end
+
+  setup do
     install_mock_provider()
+
+    # Conversation agents are long-lived (registered, never auto-stopped). Terminate every one
+    # after the test so an orphan doesn't outlive this test's sandbox checkout and crash (or
+    # contend) on the next test's shared connection.
+    on_exit(fn ->
+      for {_, pid, _, _} <- DynamicSupervisor.which_children(Agentix.ConversationSupervisor),
+          is_pid(pid) do
+        DynamicSupervisor.terminate_child(Agentix.ConversationSupervisor, pid)
+      end
+    end)
 
     id = "demo-" <> Integer.to_string(System.unique_integer([:positive]))
     Phoenix.PubSub.subscribe(Agentix.PubSub, Publisher.topic(id))
@@ -78,5 +96,62 @@ defmodule AgentixDemoWeb.ChatLiveTest do
 
   test "visiting / redirects to a canonical /c/:id conversation URL", %{conn: conn} do
     assert {:error, {:live_redirect, %{to: "/c/" <> _id}}} = live(conn, "/")
+  end
+
+  test "a gated :server tool suspends for approval, then runs and shows its result inspector",
+       %{id: id, conn: conn} do
+    MockProvider.script([
+      completion("", tool_calls: [{"get_weather", %{"city" => "Tokyo"}}]),
+      completion("Here is your forecast.")
+    ])
+
+    {:ok, live, _html} = live(conn, "/c/" <> id)
+    live |> form("form[phx-submit='send']", %{"text" => "weather in Tokyo?"}) |> render_submit()
+
+    assert_receive {:suspended, tcid, _executor, _prompt}, 2_000
+    assert render(live) =~ "Permission required"
+
+    live |> element("button[phx-value-id='#{tcid}']", "Allow") |> render_click()
+    assert_receive {:turn_completed, _ref}, 2_000
+
+    html = render_until(live, "Here is your forecast.")
+    # The :server callback ran and its result shows in the expandable inspector.
+    assert html =~ "It&#39;s 21°C and sunny in Tokyo."
+    assert html =~ "<details"
+  end
+
+  test "denying a gated :server tool resolves it without running the tool", %{id: id, conn: conn} do
+    MockProvider.script([
+      completion("", tool_calls: [{"get_weather", %{"city" => "Tokyo"}}]),
+      completion("No problem, skipping that.")
+    ])
+
+    {:ok, live, _html} = live(conn, "/c/" <> id)
+    live |> form("form[phx-submit='send']", %{"text" => "weather in Tokyo?"}) |> render_submit()
+
+    assert_receive {:suspended, tcid, _executor, _prompt}, 2_000
+    live |> element("button[phx-value-id='#{tcid}']", "Deny") |> render_click()
+    assert_receive {:turn_completed, _ref}, 2_000
+
+    html = render_until(live, "No problem, skipping that.")
+    # The callback never ran, so the weather result is absent.
+    refute html =~ "21°C and sunny in Tokyo"
+  end
+
+  test "a non-gated :server tool (calculator) runs inline and shows its result", %{
+    id: id,
+    conn: conn
+  } do
+    MockProvider.script([
+      completion("", tool_calls: [{"calculator", %{"expression" => "6 * 7"}}]),
+      completion("Math done.")
+    ])
+
+    {:ok, live, _html} = live(conn, "/c/" <> id)
+    live |> form("form[phx-submit='send']", %{"text" => "what is 6 * 7"}) |> render_submit()
+
+    assert_receive {:turn_completed, _ref}, 2_000
+    html = render_until(live, "Math done.")
+    assert html =~ "6 * 7 = 42"
   end
 end

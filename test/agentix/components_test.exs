@@ -85,6 +85,26 @@ defmodule Agentix.ComponentsTest do
       # tool rows never render a role header.
       refute html =~ "agentix-role-header"
     end
+
+    test "a finalized tool row renders its result in an expandable inspector" do
+      assigns = %{
+        message: %Message{
+          role: :tool,
+          tool_call_id: "t1",
+          content: [ContentPart.text("It's 21°C and sunny in Tokyo.")],
+          metadata: %{"tool_name" => "get_weather"}
+        }
+      }
+
+      html =
+        rendered_to_string(~H"""
+        <Agentix.Components.message message={@message} />
+        """)
+
+      assert html =~ "<details"
+      assert html =~ "Result"
+      assert html =~ "It&#39;s 21°C and sunny in Tokyo."
+    end
   end
 
   describe "message/1 — :bubble slot" do

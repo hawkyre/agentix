@@ -111,7 +111,12 @@
       <div id={@id} class="agentix-row group flex gap-3.5 py-5" data-group="agent" data-role="tool">
         <div class="agentix-avatar mt-0.5 h-7 w-7 shrink-0" aria-hidden="true"></div>
         <div class="min-w-0 flex-1">
-          <.tool id={@message.tool_call_id} name={tool_name(@message)} status={tool_status(@message)} />
+          <.tool
+            id={@message.tool_call_id}
+            name={tool_name(@message)}
+            status={tool_status(@message)}
+            result={message_text(@message)}
+          />
         </div>
       </div>
       """
@@ -175,11 +180,15 @@
       """
     end
 
-    @doc "A tool call row. `status` is `:running` | `:ok` | `:error`; `meta` is optional."
+    @doc """
+    A tool call row. `status` is `:running` | `:ok` | `:error`; `meta` (a short progress
+    label) and `result` (the full result, shown in an expandable inspector) are optional.
+    """
     attr(:id, :string, required: true)
     attr(:name, :string, required: true)
     attr(:status, :atom, default: :running)
     attr(:meta, :string, default: nil)
+    attr(:result, :string, default: nil)
 
     def tool(assigns) do
       ~H"""
@@ -190,6 +199,15 @@
           <span :if={@meta} class={["text-[12px]", tool_meta(@status)]}>{@meta}</span>
           <span class="ml-auto text-[12px] text-neutral-400">{tool_label(@status)}</span>
         </div>
+        <details
+          :if={@result not in [nil, ""]}
+          class="border-t border-neutral-200/70 dark:border-neutral-800/70"
+        >
+          <summary class="cursor-pointer list-none px-3 py-1.5 text-[12px] text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300">
+            Result
+          </summary>
+          <pre class="overflow-x-auto whitespace-pre-wrap break-words px-3 pb-2.5 text-[12px] leading-relaxed text-neutral-600 dark:text-neutral-300">{@result}</pre>
+        </details>
       </div>
       """
     end

@@ -1,17 +1,20 @@
 import Config
 
+# No Ecto sandbox: a conversation is a long-lived `:gen_statem` plus async tool tasks and
+# Oban-scheduled expiry, whose lifetimes don't nest inside one test transaction. Like
+# Agentix's own Postgres tests, the demo runs against the real pool with unique ids and a
+# clean slate (truncated in test_helper.exs).
 config :agentix_demo, AgentixDemo.Repo,
   url:
     System.get_env("DATABASE_URL") ||
       "postgres://postgres:postgres@127.0.0.1:5433/agentix_demo_test",
-  pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: 10
 
 config :agentix_demo, AgentixDemoWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
   server: false
 
-# Oban must not poll/stage during tests — jobs are inserted into the sandbox and never run.
+# Oban must not poll/stage during tests — expiry jobs are inserted but never run.
 config :agentix_demo, Oban, testing: :manual
 
 # The library composer is a send-and-clear form; LiveView form recovery doesn't apply, so

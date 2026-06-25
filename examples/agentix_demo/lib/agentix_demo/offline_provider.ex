@@ -1,46 +1,104 @@
 defmodule AgentixDemo.OfflineProvider do
   @moduledoc false
-  # An `Agentix.Provider` that needs no API key, so `mix phx.server` runs out of the box.
-  # Streams a canned reply word-by-word (real streaming UX, deterministic, offline). Unlike
-  # `Agentix.Test.MockProvider` this has **no ExUnit dependency**, so it is safe as a runtime
-  # provider. Selected by `AgentixDemo.ModelConfig` when `ANTHROPIC_API_KEY` is unset.
+  # An `Agentix.Provider` that needs no API key, so `mix phx.server` runs out of the box and
+  # still showcases every executor + live reasoning. Unlike `Agentix.Test.MockProvider` it has
+  # **no ExUnit dependency**, so it is safe as a runtime provider. Selected by
+  # `AgentixDemo.ModelConfig` when `ANTHROPIC_API_KEY` is unset.
+  #
+  # It "reasons" out loud (a thinking chunk → streamed to the JS hook), then either streams a
+  # text reply or emits a tool call based on the message: "weather …" → the gated `get_weather`
+  # server tool, a message with digits → the `calculator` server tool, a bare greeting → the
+  # `ask_user` human elicitation. Once a tool result comes back it folds it into a final answer.
   @behaviour Agentix.Provider
 
   alias Agentix.Provider
   alias ReqLLM.Message
   alias ReqLLM.Message.ContentPart
   alias ReqLLM.StreamChunk
+  alias ReqLLM.ToolCall
 
   @impl Provider
-  def stream(_model, %ReqLLM.Context{} = context, _opts) do
-    reply = canned_reply(context)
+  def stream(_model, %ReqLLM.Context{} = context, _opts), do: {:ok, to_handle(decide(context))}
 
-    # Word-by-word chunks so the live-streaming UI is exercised offline.
-    chunks =
-      reply
-      |> String.split(~r/(?<= )/)
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.map(&StreamChunk.text/1)
+  defp decide(%ReqLLM.Context{} = context) do
+    cond do
+      tool_result_text(context) ->
+        {:text, "Here's what I found: #{tool_result_text(context)}",
+         "A tool result came back — I'll fold it into a final answer."}
 
-    message = %Message{role: :assistant, content: [ContentPart.text(reply)]}
-
-    {:ok,
-     %Provider.Stream{
-       chunks: chunks,
-       cancel: fn -> :ok end,
-       finalize: fn -> {message, %{input_tokens: 0, output_tokens: 0}} end
-     }}
+      true ->
+        reply_for(last_user_text(context) || "")
+    end
   end
 
-  defp canned_reply(context) do
-    case last_user_text(context) do
-      nil ->
-        "Hi! This is the **offline demo provider** — set `ANTHROPIC_API_KEY` for real model replies."
+  defp reply_for(text) do
+    cond do
+      text =~ ~r/weather/i ->
+        {:tool, "get_weather", %{"city" => city_in(text)},
+         "They're asking about the weather — I'll call get_weather (it needs approval)."}
 
-      text ->
-        "You said: *#{text}*.\n\nThis is the **offline demo provider** (no API key set). " <>
-          "It echoes your message so the streaming UI works without a model. " <>
-          "Export `ANTHROPIC_API_KEY` and restart for real Claude responses."
+      text =~ ~r/\d/ ->
+        {:tool, "calculator", %{"expression" => text},
+         "This looks like arithmetic — I'll run the calculator tool."}
+
+      text =~ ~r/^\s*(hi|hello|hey)\b/i ->
+        {:tool, "ask_user", %{},
+         "A greeting with no task yet — I'll ask what they'd like help with."}
+
+      true ->
+        {:text, canned_reply(text), "A normal message — I'll just reply directly."}
+    end
+  end
+
+  defp to_handle({:text, text, thinking}) do
+    chunks = [StreamChunk.thinking(thinking) | word_chunks(text)]
+    message = %Message{role: :assistant, content: [ContentPart.text(text)]}
+    handle(chunks, message)
+  end
+
+  defp to_handle({:tool, name, args, thinking}) do
+    chunks = [StreamChunk.thinking(thinking), StreamChunk.tool_call(name, args)]
+
+    message = %Message{
+      role: :assistant,
+      content: [],
+      tool_calls: [ToolCall.new(nil, name, Jason.encode!(args))]
+    }
+
+    handle(chunks, message)
+  end
+
+  defp handle(chunks, message) do
+    %Provider.Stream{
+      chunks: chunks,
+      cancel: fn -> :ok end,
+      finalize: fn -> {message, %{input_tokens: 0, output_tokens: 0}} end
+    }
+  end
+
+  defp word_chunks(text),
+    do:
+      text |> String.split(~r/(?<= )/) |> Enum.reject(&(&1 == "")) |> Enum.map(&StreamChunk.text/1)
+
+  defp canned_reply(""),
+    do: "Hi! This is the **offline demo provider** — set `ANTHROPIC_API_KEY` for real replies."
+
+  defp canned_reply(text) do
+    "You said: *#{text}*.\n\nThis is the **offline demo provider** (no API key set). Try " <>
+      "\"weather in Tokyo\" for an approval-gated tool, or \"6 * 7\" for the calculator."
+  end
+
+  defp city_in(text) do
+    case Regex.run(~r/weather\s+(?:in|for)\s+([A-Za-z][A-Za-z .'-]*)/i, text) do
+      [_, city] -> String.trim(city)
+      _ -> "your area"
+    end
+  end
+
+  defp tool_result_text(%ReqLLM.Context{messages: messages}) do
+    case List.last(messages) do
+      %Message{role: :tool} = msg -> text_of(msg.content)
+      _ -> nil
     end
   end
 
