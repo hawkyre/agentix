@@ -1,7 +1,7 @@
 defmodule Agentix.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.2.0"
   @source_url "https://github.com/hawkyre/agentix"
 
   def project do
@@ -134,6 +134,7 @@ defmodule Agentix.MixProject do
         "guides/hooks-and-turn-lifecycle.md",
         "guides/tools.md",
         "guides/persistence-and-resumability.md",
+        "guides/reliability-and-structured-output.md",
         "guides/compaction.md",
         "guides/rendering.md",
         "guides/memory-and-sizing.md",
@@ -159,7 +160,12 @@ defmodule Agentix.MixProject do
           Agentix.Persistence.ETS,
           Agentix.Persistence.Ecto
         ],
-        Providers: [Agentix.Provider, Agentix.Provider.Stream, Agentix.Provider.ReqLLM],
+        Providers: [
+          Agentix.Provider,
+          Agentix.Provider.Stream,
+          Agentix.Provider.ReqLLM,
+          Agentix.Retry
+        ],
         "Events & notifiers": [
           Agentix.Notifier,
           Agentix.Notifier.PubSub,

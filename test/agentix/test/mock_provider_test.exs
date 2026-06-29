@@ -8,6 +8,7 @@ defmodule Agentix.Test.MockProviderTest do
   alias Agentix.Provider
   alias Agentix.Test.MockProvider
   alias ReqLLM.Context
+  alias ReqLLM.Error.API.Request
   alias ReqLLM.Message
   alias ReqLLM.Message.ContentPart
   alias ReqLLM.StreamChunk
@@ -93,5 +94,64 @@ defmodule Agentix.Test.MockProviderTest do
   test "install_mock_provider sets the provider and resets gracefully" do
     assert install_mock_provider() == :ok
     assert Provider.impl() == MockProvider
+  end
+
+  describe "fault injection" do
+    test "an error spec makes stream/3 return {:error, reason} carrying the HTTP status" do
+      MockProvider.script(error(503, reason: "overloaded"))
+
+      assert {:error, %Request{status: 503, reason: "overloaded"}} =
+               Provider.stream("mock:m", Context.new([]), [])
+    end
+
+    test "a 429 error carries retry-after in the headers" do
+      MockProvider.script(error(429, retry_after: 2))
+
+      assert {:error, %Request{status: 429, headers: %{"retry-after" => ["2"]}}} =
+               Provider.stream("mock:m", Context.new([]), [])
+    end
+
+    test "a transport error has nil status and the transport reason as cause" do
+      MockProvider.script(transport_error(:closed))
+
+      assert {:error, %Request{status: nil, cause: :closed}} =
+               Provider.stream("mock:m", Context.new([]), [])
+    end
+
+    test "fail-N-then-succeed sequences via the FIFO queue, recording every attempt" do
+      MockProvider.script([error(503), error(503), completion("ok")])
+
+      assert {:error, %Request{status: 503}} =
+               Provider.stream("mock:m", Context.new([]), [])
+
+      assert {:error, %Request{status: 503}} =
+               Provider.stream("mock:m", Context.new([]), [])
+
+      assert {:ok, stream} = Provider.stream("mock:m", Context.new([]), [])
+      assert [%StreamChunk{text: "ok"}] = Enum.to_list(stream.chunks)
+
+      # Every attempt — including the two failures — is recorded, so retry tests can count.
+      assert length(MockProvider.requests()) == 3
+    end
+  end
+
+  describe "object scripting" do
+    test "a scripted :object rides in the finalized message metadata" do
+      MockProvider.script(completion("here", object: %{a: 1, b: "two"}))
+      {:ok, stream} = Provider.stream("mock:m", Context.new([]), [])
+      Enum.to_list(stream.chunks)
+      {message, _usage} = stream.finalize.()
+
+      assert message.metadata["object"] == %{a: 1, b: "two"}
+    end
+
+    test "a completion without :object has empty metadata" do
+      MockProvider.script(completion("plain"))
+      {:ok, stream} = Provider.stream("mock:m", Context.new([]), [])
+      Enum.to_list(stream.chunks)
+      {message, _usage} = stream.finalize.()
+
+      assert message.metadata == %{}
+    end
   end
 end

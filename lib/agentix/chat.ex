@@ -7,7 +7,9 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     conversation's live events into assigns (via an internal projection) and imports
     the verbs below. The host owns the template — it renders its own HEEx against the
     projected assigns (`:messages`, `:streaming_message`, `:state`, `:streaming?`,
-    `:in_flight_tools`, `:pending`); default components are a separate, optional layer.
+    `:in_flight_tools`, `:pending`, `:last_object`); default components are a separate,
+    optional layer. `:last_object` is the most recent assistant message's structured-output
+    object (see `Agentix.object/1`), or `nil`.
 
         defmodule MyAppWeb.ChatLive do
           use MyAppWeb, :live_view
@@ -90,13 +92,17 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     in-flight turn, or `:unknown_conversation` for one that was never started) the
     message is **not** inserted and `:agentix_error` is set to the reason so the host can
     surface it — the input is never dropped silently.
+
+    Pass `:schema` in `opts` for structured output on this turn (see
+    `Agentix.Conversation.send_message/4`).
     """
     @spec send_message(Socket.t(), Conversation.message(), keyword()) ::
             Socket.t()
     def send_message(socket, message, opts \\ []) do
       scope = Keyword.get(opts, :scope, Scope.new())
+      turn_opts = Keyword.take(opts, [:schema])
 
-      case Conversation.send_message(conversation_id(socket), message, scope) do
+      case Conversation.send_message(conversation_id(socket), message, scope, turn_opts) do
         :ok ->
           socket
           |> assign(:agentix_error, nil)

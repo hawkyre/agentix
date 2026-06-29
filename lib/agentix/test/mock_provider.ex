@@ -3,7 +3,11 @@ defmodule Agentix.Test.MockProvider do
   A scriptable `Agentix.Provider` for deterministic tests — no API key, no network.
 
   Enqueue response specs with `script/1`; each `stream/3` call pops the next one
-  (FIFO) and records the request. Build specs with `Agentix.Test.completion/2`.
+  (FIFO) and records the request. Build specs with `Agentix.Test.completion/2` (a
+  successful turn, optionally carrying a structured `:object`) or `Agentix.Test.error/2`
+  / `Agentix.Test.transport_error/1` (a failed `stream/3` returning `{:error, reason}`).
+  Sequencing a list — `script([error(503), error(503), completion("ok")])` — drives the
+  fail-N-then-succeed scenarios the retry path needs.
 
   Process-based and globally named, so drive it from a single test process and run
   those tests `async: false`. Start it with `start_supervised!(Agentix.Test.MockProvider)`
@@ -60,7 +64,12 @@ defmodule Agentix.Test.MockProvider do
         {spec, %{state | scripts: scripts, requests: [request | state.requests]}}
       end)
 
-    {:ok, build_stream(spec)}
+    # An error spec fails the call (the request is still recorded above, so retry tests
+    # can count attempts); any other spec builds a successful stream.
+    case spec do
+      %{__error__: reason} -> {:error, reason}
+      _ -> {:ok, build_stream(spec)}
+    end
   end
 
   defp build_stream(spec) do
@@ -82,7 +91,8 @@ defmodule Agentix.Test.MockProvider do
       text: Map.get(spec, :text, ""),
       thinking: Map.get(spec, :thinking),
       tool_calls: spec |> Map.get(:tool_calls, []) |> Enum.map(&normalize_tool_call/1),
-      usage: Map.get(spec, :usage, %{})
+      usage: Map.get(spec, :usage, %{}),
+      object: Map.get(spec, :object)
     }
   end
 
@@ -107,6 +117,10 @@ defmodule Agentix.Test.MockProvider do
         list -> list
       end
 
-    %Message{role: :assistant, content: content, tool_calls: tool_calls}
+    # A scripted `:object` rides in metadata under "object" — mirroring where the real
+    # ReqLLM provider stashes a parsed structured-output result (Inc 5).
+    metadata = if spec.object, do: %{"object" => spec.object}, else: %{}
+
+    %Message{role: :assistant, content: content, tool_calls: tool_calls, metadata: metadata}
   end
 end
