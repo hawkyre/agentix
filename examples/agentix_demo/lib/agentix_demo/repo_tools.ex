@@ -12,15 +12,12 @@ defmodule AgentixDemo.RepoTools do
   @spec root() :: String.t()
   def root, do: Path.expand("../..", File.cwd!())
 
-  @doc "ripgrep the source (lib + guides) for `query`; returns matching `file:line` snippets."
+  @doc "grep the source (lib + guides) for `query`; returns matching `file:line` snippets."
   @spec search_code(String.t()) :: String.t()
   def search_code(query) when is_binary(query) and query != "" do
-    case System.cmd(
-           "rg",
-           ["--line-number", "--no-heading", "--max-count", "4", "--", query, "lib", "guides"],
-           cd: root(),
-           stderr_to_stdout: true
-         ) do
+    # Prefer ripgrep (gitignore-aware, fast) but fall back to grep so the demo runs on any host
+    # without ripgrep installed (e.g. a stock CI runner). Both emit `file:line:` matches.
+    case grep(query) do
       {"", _} -> "No matches for #{inspect(query)}."
       {out, 0} -> cap(out)
       {_, _} -> "No matches for #{inspect(query)}."
@@ -71,6 +68,28 @@ defmodule AgentixDemo.RepoTools do
   end
 
   def run_tests(_), do: "Provide a test file path (e.g. test/agentix/hook_test.exs)."
+
+  # --- search backend ---
+
+  defp grep(query) do
+    case System.find_executable("rg") do
+      nil ->
+        # `-r` recursive, `-n` line numbers, `-I` skip binaries, `-m 4` cap per file, `-e` so a
+        # leading `-` in the query isn't read as a flag. grep prefixes `file:line:` like rg does.
+        System.cmd("grep", ["-rIn", "-m", "4", "-e", query, "lib", "guides"],
+          cd: root(),
+          stderr_to_stdout: true
+        )
+
+      rg ->
+        System.cmd(
+          rg,
+          ["--line-number", "--no-heading", "--max-count", "4", "--", query, "lib", "guides"],
+          cd: root(),
+          stderr_to_stdout: true
+        )
+    end
+  end
 
   # --- safety helpers ---
 
