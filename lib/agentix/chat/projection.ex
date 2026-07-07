@@ -28,7 +28,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
 
     @live_event_tags ~w(state_changed turn_started text_delta thinking_delta message_completed
                         tool_call_started tool_progress tool_call_resolved tool_call_errored
-                        suspended turn_completed turn_halted cancelled)a
+                        suspended turn_completed turn_halted turn_failed cancelled)a
 
     @doc "The assign key holding the bound conversation id."
     @spec conversation_assign() :: atom()
@@ -182,6 +182,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
 
     def apply_event(socket, {:turn_completed, _turn_ref}), do: reset_turn(socket)
     def apply_event(socket, {:turn_halted, _turn_ref, _reason}), do: reset_turn(socket)
+    def apply_event(socket, {:turn_failed, _turn_ref, _reason}), do: reset_turn(socket)
     def apply_event(socket, {:cancelled, _turn_ref}), do: reset_turn(socket)
 
     @doc "`true` while an assistant message is being produced."

@@ -21,6 +21,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent process without ending the conversation (persisted events remain; the
   next `ensure_started/2` revives it). Replaces hosts reaching into
   `Agentix.Registry` / `Agentix.ConversationSupervisor` internals.
+- `{:turn_failed, turn_ref, reason}` live event — provider/stream failures now
+  get their own terminal event carrying the reason. Previously they broadcast
+  the same `{:cancelled, turn_ref}` as a user-initiated cancel, so consumers
+  could not distinguish "your key/provider failed" (e.g. an auth rejection)
+  from "you cancelled".
+
+### Changed
+
+- A per-conversation `api_key` resolver fun is now evaluated inside the
+  monitored streaming task: a raising resolver fails the turn
+  (`{:turn_failed, …}`) instead of crashing the conversation's agent process.
+
+### Breaking
+
+- Turns that fail on a provider/stream error no longer emit
+  `{:cancelled, turn_ref}` — subscribe to `{:turn_failed, turn_ref, reason}`
+  for that terminal. `{:cancelled, …}` is now exclusively user-initiated.
 
 ## [0.2.0] - 2026-06-25
 

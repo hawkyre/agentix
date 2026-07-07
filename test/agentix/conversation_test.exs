@@ -183,6 +183,32 @@ defmodule Agentix.ConversationTest do
       assert [%{opts: opts}] = MockProvider.requests()
       refute Keyword.has_key?(opts, :api_key)
     end
+
+    test "a raising resolver fails the turn, not the agent", %{id: id} do
+      MockProvider.script([completion("unreached"), completion("recovered")])
+      resolver = fn -> raise "vault unavailable" end
+      {:ok, pid} = Conversation.ensure_started(id, config: config(api_key: resolver))
+
+      :ok = Conversation.send_message(id, "Hi", Scope.new())
+
+      # The turn fails with the crash reason; the gen_statem survives and the
+      # next turn (with a healthy config) proceeds normally.
+      assert_receive {:turn_failed, _ref, _reason}
+      assert Process.alive?(pid)
+    end
+  end
+
+  describe "turn_failed" do
+    test "a provider error terminates the turn with the reason, not :cancelled", %{id: id} do
+      MockProvider.script(error(401, reason: "unauthorized"))
+      {:ok, _pid} = Conversation.ensure_started(id, config: config(retry: false))
+
+      :ok = Conversation.send_message(id, "Hi", Scope.new())
+
+      assert_receive {:turn_failed, _ref, %{status: 401}}
+      refute_receive {:cancelled, _ref}, 30
+      assert_receive {:state_changed, :idle}
+    end
   end
 
   describe "stop/1" do

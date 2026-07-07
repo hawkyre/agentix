@@ -90,7 +90,7 @@ defmodule Agentix.AgentRetryTest do
 
     :ok = Conversation.send_message(id, "Hi", Scope.new())
 
-    assert_receive {:cancelled, _ref}
+    assert_receive {:turn_failed, _ref, _reason}
     assert_receive {:state_changed, :idle}
     refute_receive {:retry_telemetry, _, _}, 30
     assert length(MockProvider.requests()) == 1
@@ -102,7 +102,7 @@ defmodule Agentix.AgentRetryTest do
 
     :ok = Conversation.send_message(id, "Hi", Scope.new())
 
-    assert_receive {:cancelled, _ref}
+    assert_receive {:turn_failed, _ref, _reason}
     refute_receive {:retry_telemetry, _, _}, 30
     assert length(MockProvider.requests()) == 1
   end
@@ -120,7 +120,7 @@ defmodule Agentix.AgentRetryTest do
     assert_receive {:retry_telemetry, %{attempt: 1}, _}
     # Only one retry: attempt 2 is the last and still fails, so the turn fails.
     refute_receive {:retry_telemetry, %{attempt: 2}, _}, 30
-    assert_receive {:cancelled, _ref}
+    assert_receive {:turn_failed, _ref, _reason}
     assert length(MockProvider.requests()) == 2
   end
 
@@ -133,7 +133,7 @@ defmodule Agentix.AgentRetryTest do
 
     # The first token forwards, then the stream crashes — the turn fails, with no retry.
     assert_receive {:text_delta, _ref, _msg_id, "partial", _seq}
-    assert_receive {:cancelled, _ref}
+    assert_receive {:turn_failed, _ref, _reason}
     refute_receive {:retry_telemetry, _, _}, 30
   end
 

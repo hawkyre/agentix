@@ -437,13 +437,18 @@ defmodule Agentix.Agent do
     # Tools are handed to the provider for schema/serialization; the loop dispatches
     # them itself (the provider never auto-executes). Other opts (temperature,
     # max_tokens, pool config) are derived from config in a later increment.
-    opts = stream_opts(data.config, turn.schema)
+    # `stream_opts` is evaluated INSIDE the task: an `api_key` resolver fun that
+    # raises then crashes the monitored task (→ the turn fails cleanly via the
+    # :DOWN handler) instead of taking down this gen_statem.
+    config = data.config
+    schema = turn.schema
     transformer = data.config.stream_transformer
     retry = data.config.retry
     conversation_id = data.conversation_id
 
     %{pid: pid, ref: ref} =
       Task.Supervisor.async_nolink(Agentix.TaskSupervisor, fn ->
+        opts = stream_opts(config, schema)
         run_stream(agent, turn.ref, model, context, opts, transformer, retry, conversation_id)
       end)
 
@@ -539,7 +544,11 @@ defmodule Agentix.Agent do
     Logger.warning("agentix stream failed: #{inspect(reason)}")
 
     data = record_partial(data, :error)
-    Publisher.cancelled(data.publisher, turn.ref)
+    # Provider/stream failures get their own terminal event, WITH the reason —
+    # `cancelled` stays reserved for user-initiated cancellation, so a consumer
+    # can distinguish "your key/provider failed" (e.g. an auth rejection) from
+    # "you cancelled". Added in 0.3.0.
+    Publisher.turn_failed(data.publisher, turn.ref, reason)
 
     :telemetry.execute(
       [:agentix, :turn, :exception],
