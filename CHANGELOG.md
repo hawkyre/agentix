@@ -35,10 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The ETS persistence owner now starts unconditionally (previously only when
   ETS was the app-configured adapter), so ETS is usable in tests and tools
   regardless of the app default.
-- `Agentix.Persistence.delete_conversation/1` (+ behaviour callback on both
-  adapters): removes a conversation and everything under it (events,
-  summaries, tool calls, audit rows). Ephemeral one-shot tasks call it after
-  reading usage so throwaway conversations never accumulate.
+
 - `Config.persistence` is documented as **Reserved**: the agent persists
   through the application-level adapter only; the field was never consulted
   and the old doc implied otherwise.
@@ -49,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- New required `Agentix.Persistence` behaviour callback
+  `delete_conversation/1` (implemented by both bundled adapters): removes a
+  conversation and everything under it (events, summaries, tool calls, audit
+  rows) — ephemeral one-shot tasks call it after reading usage so throwaway
+  conversations never accumulate. Third-party adapters must implement it.
 - Turns that fail on a provider/stream error no longer emit
   `{:cancelled, turn_ref}` — subscribe to `{:turn_failed, turn_ref, reason}`
   for that terminal. `{:cancelled, …}` is now exclusively user-initiated.

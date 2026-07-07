@@ -211,7 +211,10 @@ defmodule Agentix.Persistence.ETS do
     :ok
   end
 
-  defp pending_and_settled_tool_call_ids(conversation_id) do
+  # Every tool-call id for the conversation, regardless of status. Full-table
+  # scan — @tool_calls is keyed by provider id only, and this path serves
+  # tests/one-shot cleanup, never a hot loop.
+  defp all_tool_call_ids(conversation_id) do
     @tool_calls
     |> :ets.tab2list()
     |> Enum.filter(fn {_id, record} -> record.conversation_id == conversation_id end)
