@@ -200,9 +200,7 @@ defmodule Agentix.Persistence.ETS do
 
   @impl true
   def delete_conversation(conversation_id) do
-    tool_call_ids = pending_and_settled_tool_call_ids(conversation_id)
-
-    Enum.each(tool_call_ids, &:ets.delete(@tool_calls, &1))
+    Enum.each(all_tool_call_ids(conversation_id), &:ets.delete(@tool_calls, &1))
     :ets.match_delete(@events, {{conversation_id, :_}, :_})
     :ets.match_delete(@summaries, {{conversation_id, :_}, :_})
     :ets.match_delete(@model_calls, {{conversation_id, :_}, :_})
