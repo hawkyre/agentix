@@ -157,8 +157,10 @@ if Code.ensure_loaded?(Ecto) do
     # Config settings carry functions/structs (`tools`, `hooks`, `stream_transformer`) and
     # runtime wiring (`persistence`, `notifier`, `pubsub`) that have no JSON form. Drop them
     # before the jsonb write; the host re-registers them at `ensure_started` (the ETS adapter
-    # keeps them verbatim, so this trimming is Ecto-only).
-    @nonserializable_settings ~w(tools hooks stream_transformer persistence notifier pubsub)
+    # keeps them verbatim, so this trimming is Ecto-only). `api_key` is dropped for secrecy,
+    # not just serializability: even its string form must never land in a durable row (and
+    # the resolver-fun form would crash the jsonb encode).
+    @nonserializable_settings ~w(tools hooks stream_transformer api_key persistence notifier pubsub)
     @nonserializable_keys @nonserializable_settings ++
                             Enum.map(@nonserializable_settings, &String.to_atom/1)
 

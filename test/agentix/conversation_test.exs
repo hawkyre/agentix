@@ -63,6 +63,20 @@ defmodule Agentix.ConversationTest do
 
   defp config(opts \\ []), do: Config.new(Keyword.merge([model: "mock:test"], opts))
 
+  defp wait_for_unregister(id, attempts \\ 200)
+  defp wait_for_unregister(_id, 0), do: false
+
+  defp wait_for_unregister(id, attempts) do
+    case Registry.lookup(Agentix.Registry, id) do
+      [] ->
+        true
+
+      _ ->
+        Process.sleep(5)
+        wait_for_unregister(id, attempts - 1)
+    end
+  end
+
   defp request_text do
     %{context: context} = List.last(MockProvider.requests())
 
@@ -128,6 +142,75 @@ defmodule Agentix.ConversationTest do
       assert_receive {:thinking_delta, _ref, _msg_id, "let me think", _seq}
       assert_receive {:text_delta, _ref, _msg_id, "answer", _seq}
       assert_receive {:turn_completed, _ref}
+    end
+  end
+
+  describe "api_key pass-through" do
+    test "a configured string key reaches the provider as :api_key", %{id: id} do
+      MockProvider.script(completion("ok"))
+      {:ok, _pid} = Conversation.ensure_started(id, config: config(api_key: "sk-static"))
+
+      :ok = Conversation.send_message(id, "Hi", Scope.new())
+      assert_receive {:turn_completed, _ref}
+
+      assert [%{opts: opts}] = MockProvider.requests()
+      assert opts[:api_key] == "sk-static"
+    end
+
+    test "a resolver fun is re-evaluated on every model call", %{id: id} do
+      MockProvider.script([completion("one"), completion("two")])
+      {:ok, agent} = Elixir.Agent.start_link(fn -> 0 end)
+      resolver = fn -> "sk-#{Elixir.Agent.get_and_update(agent, &{&1 + 1, &1 + 1})}" end
+      {:ok, _pid} = Conversation.ensure_started(id, config: config(api_key: resolver))
+
+      :ok = Conversation.send_message(id, "Hi", Scope.new())
+      assert_receive {:turn_completed, _ref}
+      :ok = Conversation.send_message(id, "Again", Scope.new())
+      assert_receive {:turn_completed, _ref}
+
+      assert [%{opts: first}, %{opts: second}] = MockProvider.requests()
+      assert first[:api_key] == "sk-1"
+      assert second[:api_key] == "sk-2"
+    end
+
+    test "no configured key sends no :api_key opt", %{id: id} do
+      MockProvider.script(completion("ok"))
+      {:ok, _pid} = Conversation.ensure_started(id, config: config())
+
+      :ok = Conversation.send_message(id, "Hi", Scope.new())
+      assert_receive {:turn_completed, _ref}
+
+      assert [%{opts: opts}] = MockProvider.requests()
+      refute Keyword.has_key?(opts, :api_key)
+    end
+  end
+
+  describe "stop/1" do
+    test "stops a running agent and is a no-op when absent", %{id: id} do
+      MockProvider.script(completion("ok"))
+      {:ok, pid} = Conversation.ensure_started(id, config: config())
+      ref = Process.monitor(pid)
+
+      assert :ok = Conversation.stop(id)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+      # Registry unregistration is asynchronous after the DOWN; poll briefly.
+      assert wait_for_unregister(id)
+
+      # not running → still :ok
+      assert :ok = Conversation.stop(id)
+    end
+
+    test "a stopped conversation revives on ensure_started with its events intact", %{id: id} do
+      MockProvider.script(completion("first"))
+      {:ok, _pid} = Conversation.ensure_started(id, config: config())
+      :ok = Conversation.send_message(id, "Hi", Scope.new())
+      assert_receive {:turn_completed, _ref}
+
+      :ok = Conversation.stop(id)
+
+      # ETS persistence keeps settings verbatim, so no config: needed to revive.
+      {:ok, _pid} = Conversation.ensure_started(id)
+      assert [%{type: :user_msg}, %{type: :assistant_msg}] = Persistence.stream_events(id)
     end
   end
 

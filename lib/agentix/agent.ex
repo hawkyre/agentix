@@ -1313,14 +1313,22 @@ defmodule Agentix.Agent do
   defp tool_result_status(_result), do: :error
 
   # Provider opts: hand the tool schemas through (the loop dispatches them itself), plus an
-  # optional structured-output `:schema` for this turn (the provider branches to object mode).
-  defp stream_opts(config, schema), do: tool_opts(config) ++ schema_opts(schema)
+  # optional structured-output `:schema` for this turn (the provider branches to object mode),
+  # plus the per-conversation `:api_key` when configured (a resolver fun is re-evaluated here,
+  # per model call, so a rotated key applies without restarting the conversation).
+  defp stream_opts(config, schema), do: tool_opts(config) ++ schema_opts(schema) ++ key_opts(config)
 
   defp tool_opts(%Config{tools: []}), do: []
   defp tool_opts(%Config{tools: tools}), do: [tools: Tool.to_reqllm(tools)]
 
   defp schema_opts(nil), do: []
   defp schema_opts(schema), do: [schema: schema]
+
+  defp key_opts(%Config{api_key: nil}), do: []
+  defp key_opts(%Config{api_key: key}) when is_binary(key), do: [api_key: key]
+
+  defp key_opts(%Config{api_key: resolver}) when is_function(resolver, 0),
+    do: [api_key: resolver.()]
 
   ## Recovery
 

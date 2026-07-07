@@ -163,4 +163,37 @@ defmodule Agentix.Conversation.ConfigTest do
       assert config.response_format == schema
     end
   end
+
+  describe "api_key" do
+    test "defaults to nil (ReqLLM's own resolution)" do
+      assert Config.new(model: "m").api_key == nil
+    end
+
+    test "accepts a non-empty string" do
+      assert Config.new(model: "m", api_key: "sk-test").api_key == "sk-test"
+    end
+
+    test "accepts a 0-arity resolver fun" do
+      resolver = fn -> "sk-resolved" end
+      assert Config.new(model: "m", api_key: resolver).api_key == resolver
+    end
+
+    test "rejects an empty string" do
+      assert_raise ArgumentError, ~r/api_key must be/, fn ->
+        Config.new(model: "m", api_key: "")
+      end
+    end
+
+    test "rejects a fun of the wrong arity" do
+      assert_raise ArgumentError, ~r/api_key must be/, fn ->
+        Config.new(model: "m", api_key: fn _provider -> "sk" end)
+      end
+    end
+
+    test "rejects a non-string scalar" do
+      assert_raise ArgumentError, ~r/api_key must be/, fn ->
+        Config.new(model: "m", api_key: 123)
+      end
+    end
+  end
 end

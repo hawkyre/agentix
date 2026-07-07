@@ -86,6 +86,29 @@ defmodule Agentix.Conversation do
     end
   end
 
+  @doc """
+  Stops the conversation's agent process. A no-op when it isn't running.
+
+  The conversation itself is not ended — its persisted events remain, and the next
+  `ensure_started/2` revives it (pass `config:` again if the conversation relies on
+  non-persisted settings such as `api_key`, tools, or hooks). Use this to release an
+  idle agent without losing history.
+  """
+  @spec stop(String.t()) :: :ok
+  def stop(conversation_id) when is_binary(conversation_id) do
+    case Registry.lookup(Agentix.Registry, conversation_id) do
+      [{pid, _}] ->
+        # The pid can die between lookup and terminate; :not_found is success here.
+        case DynamicSupervisor.terminate_child(Agentix.ConversationSupervisor, pid) do
+          :ok -> :ok
+          {:error, :not_found} -> :ok
+        end
+
+      [] ->
+        :ok
+    end
+  end
+
   defp start_agent(conversation_id, opts) do
     spec = {Agent, [{:conversation_id, conversation_id} | opts]}
 

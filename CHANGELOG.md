@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-07
+
+### Added
+
+- Per-conversation `api_key` on `Agentix.Conversation.Config` — a string or a
+  **0-arity resolver fun** (re-evaluated on every model call) passed to the
+  provider as a per-request option. `nil` keeps ReqLLM's own key resolution.
+  The Ecto persistence adapter's settings sanitizer drops it, so key material
+  never lands in a durable row; a conversation revived from persisted settings
+  alone is key-less and the host must re-pass a fresh `config:`.
+- `Agentix.Conversation.stop/1` — public verb to release an idle conversation's
+  agent process without ending the conversation (persisted events remain; the
+  next `ensure_started/2` revives it). Replaces hosts reaching into
+  `Agentix.Registry` / `Agentix.ConversationSupervisor` internals.
+
 ## [0.2.0] - 2026-06-25
 
 ### Added
