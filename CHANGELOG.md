@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Config.persistence` is documented as **Reserved**: the agent persists
   through the application-level adapter only; the field was never consulted
   and the old doc implied otherwise.
+- Agents now trap exits: `Conversation.stop/1` and supervisor shutdown drain
+  the in-flight callback before terminating, so an agent mid-write to durable
+  persistence is never killed between statements (previously a stop could
+  sever a checked-out DB connection mid-query).
 
 ### Breaking
 

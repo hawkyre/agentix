@@ -149,6 +149,10 @@ defmodule Agentix.Agent do
 
   @impl :gen_statem
   def init(opts) do
+    # Trap exits so a supervisor shutdown (Conversation.stop/1, app stop)
+    # drains the in-flight callback before terminating — an agent mid-write to
+    # durable persistence must never be killed between statements (0.3.0).
+    Process.flag(:trap_exit, true)
     conversation_id = Keyword.fetch!(opts, :conversation_id)
 
     case resolve_config(conversation_id, opts) do
