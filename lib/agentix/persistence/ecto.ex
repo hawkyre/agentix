@@ -348,6 +348,14 @@ if Code.ensure_loaded?(Ecto) do
     end
 
     @impl true
+    def delete_conversation(conversation_id) do
+      # The FKs cascade: events, summaries, tool calls, and model calls all
+      # hang off agentix_conversations with on_delete: :delete_all.
+      repo().delete_all(from(c in Conversation, where: c.id == ^conversation_id))
+      :ok
+    end
+
+    @impl true
     def gc_model_calls(conversation_id, ttl_ms) do
       cutoff = DateTime.add(DateTime.utc_now(), -ttl_ms, :millisecond)
 

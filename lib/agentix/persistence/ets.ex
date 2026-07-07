@@ -198,5 +198,25 @@ defmodule Agentix.Persistence.ETS do
     {:ok, length(stale)}
   end
 
+  @impl true
+  def delete_conversation(conversation_id) do
+    tool_call_ids = pending_and_settled_tool_call_ids(conversation_id)
+
+    Enum.each(tool_call_ids, &:ets.delete(@tool_calls, &1))
+    :ets.match_delete(@events, {{conversation_id, :_}, :_})
+    :ets.match_delete(@summaries, {{conversation_id, :_}, :_})
+    :ets.match_delete(@model_calls, {{conversation_id, :_}, :_})
+    :ets.delete(@conversations, {:seq, conversation_id})
+    :ets.delete(@conversations, conversation_id)
+    :ok
+  end
+
+  defp pending_and_settled_tool_call_ids(conversation_id) do
+    @tool_calls
+    |> :ets.tab2list()
+    |> Enum.filter(fn {_id, record} -> record.conversation_id == conversation_id end)
+    |> Enum.map(fn {id, _record} -> id end)
+  end
+
   defp audit_enabled?, do: Application.get_env(:agentix, :audit, false)
 end
