@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A per-conversation `api_key` resolver fun is now evaluated inside the
   monitored streaming task: a raising resolver fails the turn
   (`{:turn_failed, …}`) instead of crashing the conversation's agent process.
+- The ETS persistence owner now starts unconditionally (previously only when
+  ETS was the app-configured adapter): a per-conversation `Config.persistence`
+  may select ETS even when the app default is Ecto — the ephemeral one-shot
+  pattern — so the tables must always exist.
 
 ### Breaking
 
