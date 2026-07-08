@@ -17,7 +17,6 @@ defmodule Agentix.Conversation.ConfigTest do
     assert config.working_budget == 30_000
     assert config.default_timeout == 300_000
     assert config.audit? == false
-    assert config.persistence == nil
   end
 
   test "new/1 overrides defaults from attrs" do

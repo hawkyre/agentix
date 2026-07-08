@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Removed the reserved `persistence` field from `Agentix.Conversation.Config`
+  (documented as unused in 0.3.0; it was never consulted). `Config.new/1` now
+  raises on a `:persistence` key — persistence is configured at the application
+  level only (`config :agentix, :persistence`), and ephemeral one-shots clean
+  up via `Agentix.Persistence.delete_conversation/1`.
+
 ## [0.3.0] - 2026-07-07
 
 ### Added

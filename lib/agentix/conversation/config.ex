@@ -42,11 +42,6 @@ defmodule Agentix.Conversation.Config do
       and the host must re-pass a fresh config if it relies on per-conversation keys.
     * `notifier` / `pubsub` — wiring resolved at runtime; `nil` falls back to
       the application-level configuration.
-    * `persistence` — **Reserved**: the agent currently persists through the
-      application-level adapter only (`config :agentix, :persistence`); this
-      field is not consulted. Ephemeral one-shots should delete themselves via
-      `Agentix.Persistence.delete_conversation/1` instead of expecting a
-      per-conversation adapter.
 
   Like `tools`, `hooks`/`stream_transformer` are functions, not JSON-serializable;
   they live here and are rebuilt from config on revival (verbatim for the ETS adapter).
@@ -71,7 +66,6 @@ defmodule Agentix.Conversation.Config do
           retry:
             %{max_attempts: pos_integer(), base_ms: pos_integer(), max_ms: pos_integer()} | false,
           response_format: keyword() | map() | nil,
-          persistence: module() | {module(), keyword()} | nil,
           notifier: module() | nil,
           pubsub: atom() | nil
         }
@@ -108,7 +102,6 @@ defmodule Agentix.Conversation.Config do
     audit?: false,
     retry: @default_retry,
     response_format: nil,
-    persistence: nil,
     notifier: nil,
     pubsub: nil
   ]
@@ -123,7 +116,7 @@ defmodule Agentix.Conversation.Config do
   """
   @config_fields ~w(model system_prompt tools hooks stream_transformer api_key working_budget
                     injection_reserve tool_retention compaction_window default_timeout
-                    hook_timeout audit? retry response_format persistence notifier pubsub)a
+                    hook_timeout audit? retry response_format notifier pubsub)a
   @field_strings Map.new(@config_fields, &{Atom.to_string(&1), &1})
 
   @spec new(keyword() | map()) :: t()
