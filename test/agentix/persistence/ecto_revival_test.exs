@@ -106,4 +106,29 @@ defmodule Agentix.Persistence.EctoRevivalTest do
       )
     )
   end
+
+  test "api_key (resolver fun) neither crashes the settings write nor persists", %{id: id} do
+    MockProvider.script(completion("ok"))
+
+    # A fun in the jsonb settings would crash the encode if it weren't sanitized out.
+    {:ok, _pid} = Conversation.ensure_started(id, config: config(api_key: fn -> "sk-secret" end))
+    :ok = Conversation.send_message(id, "Hi", Scope.new())
+    assert_receive {:turn_completed, _ref}
+
+    settings = Persistence.get_conversation(id).settings
+    refute Map.has_key?(settings, "api_key")
+    refute inspect(settings) =~ "sk-secret"
+  end
+
+  test "api_key (string form) is dropped from persisted settings too", %{id: id} do
+    MockProvider.script(completion("ok"))
+
+    {:ok, _pid} = Conversation.ensure_started(id, config: config(api_key: "sk-static-secret"))
+    :ok = Conversation.send_message(id, "Hi", Scope.new())
+    assert_receive {:turn_completed, _ref}
+
+    settings = Persistence.get_conversation(id).settings
+    refute Map.has_key?(settings, "api_key")
+    refute inspect(settings) =~ "sk-static-secret"
+  end
 end

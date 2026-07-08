@@ -155,10 +155,12 @@ if Code.ensure_loaded?(Ecto) do
     end
 
     # Config settings carry functions/structs (`tools`, `hooks`, `stream_transformer`) and
-    # runtime wiring (`persistence`, `notifier`, `pubsub`) that have no JSON form. Drop them
+    # runtime wiring (`notifier`, `pubsub`) that have no JSON form. Drop them
     # before the jsonb write; the host re-registers them at `ensure_started` (the ETS adapter
-    # keeps them verbatim, so this trimming is Ecto-only).
-    @nonserializable_settings ~w(tools hooks stream_transformer persistence notifier pubsub)
+    # keeps them verbatim, so this trimming is Ecto-only). `api_key` is dropped for secrecy,
+    # not just serializability: even its string form must never land in a durable row (and
+    # the resolver-fun form would crash the jsonb encode).
+    @nonserializable_settings ~w(tools hooks stream_transformer api_key notifier pubsub)
     @nonserializable_keys @nonserializable_settings ++
                             Enum.map(@nonserializable_settings, &String.to_atom/1)
 
@@ -343,6 +345,14 @@ if Code.ensure_loaded?(Ecto) do
       )
       |> repo().all()
       |> Enum.map(&to_model_call/1)
+    end
+
+    @impl true
+    def delete_conversation(conversation_id) do
+      # The FKs cascade: events, summaries, tool calls, and model calls all
+      # hang off agentix_conversations with on_delete: :delete_all.
+      repo().delete_all(from(c in Conversation, where: c.id == ^conversation_id))
+      :ok
     end
 
     @impl true

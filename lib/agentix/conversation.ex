@@ -26,9 +26,9 @@ defmodule Agentix.Conversation do
   """
   @spec ensure_started(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def ensure_started(conversation_id, opts \\ []) when is_binary(conversation_id) do
-    case Registry.lookup(Agentix.Registry, conversation_id) do
-      [{pid, _}] -> {:ok, pid}
-      [] -> start_agent(conversation_id, opts)
+    case lookup_agent(conversation_id) do
+      {:ok, pid} -> {:ok, pid}
+      :error -> start_agent(conversation_id, opts)
     end
   end
 
@@ -80,9 +80,42 @@ defmodule Agentix.Conversation do
   @doc "Cancels the in-flight turn from any non-idle state. A no-op if not running."
   @spec cancel(String.t()) :: :ok
   def cancel(conversation_id) do
+    case lookup_agent(conversation_id) do
+      {:ok, _pid} -> :gen_statem.call(Agent.via(conversation_id), :cancel)
+      :error -> :ok
+    end
+  end
+
+  @doc """
+  Stops the conversation's agent process. A no-op when it isn't running.
+
+  The conversation itself is not ended — its persisted events remain, and the next
+  `ensure_started/2` revives it (pass `config:` again if the conversation relies on
+  non-persisted settings such as `api_key`, tools, or hooks). Use this to release an
+  idle agent without losing history.
+  """
+  @spec stop(String.t()) :: :ok
+  def stop(conversation_id) when is_binary(conversation_id) do
+    case lookup_agent(conversation_id) do
+      {:ok, pid} -> terminate_agent(pid)
+      :error -> :ok
+    end
+  end
+
+  @spec lookup_agent(String.t()) :: {:ok, pid()} | :error
+  defp lookup_agent(conversation_id) do
     case Registry.lookup(Agentix.Registry, conversation_id) do
-      [{_pid, _}] -> :gen_statem.call(Agent.via(conversation_id), :cancel)
-      [] -> :ok
+      [{pid, _}] -> {:ok, pid}
+      [] -> :error
+    end
+  end
+
+  # The pid can die between lookup and terminate; :not_found is success here.
+  @spec terminate_agent(pid()) :: :ok
+  defp terminate_agent(pid) do
+    case DynamicSupervisor.terminate_child(Agentix.ConversationSupervisor, pid) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
     end
   end
 

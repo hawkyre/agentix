@@ -234,6 +234,33 @@ defmodule Agentix.PersistenceConformance do
           Application.delete_env(:agentix, :audit)
         end
       end
+
+      test "delete_conversation removes the row, its events, and its audit rows" do
+        conv = uid("conv")
+
+        Application.put_env(:agentix, :audit, true)
+
+        try do
+          :ok = @adapter.put_conversation(conv, %{settings: %{"a" => 1}})
+          {:ok, _seq} = @adapter.append_event(conv, Event.new(:user_msg, %{n: 1}))
+          :ok = @adapter.put_model_call(conv, %{turn_ref: 1, rendered_context: %{}})
+
+          :ok = @adapter.delete_conversation(conv)
+
+          assert @adapter.get_conversation(conv) == nil
+          assert @adapter.stream_events(conv) == []
+          assert @adapter.model_calls(conv) == []
+
+          # Idempotent: deleting an unknown/already-deleted id is still :ok.
+          assert @adapter.delete_conversation(conv) == :ok
+
+          # The seq counter reset with the conversation: a fresh append is seq 1.
+          {:ok, seq} = @adapter.append_event(conv, Event.new(:user_msg, %{n: 2}))
+          assert seq == 1
+        after
+          Application.delete_env(:agentix, :audit)
+        end
+      end
     end
   end
 end

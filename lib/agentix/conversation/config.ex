@@ -33,11 +33,20 @@ defmodule Agentix.Conversation.Config do
     * `hooks` — `Agentix.Hook` structs run around each model call.
     * `stream_transformer` — a `(chunk -> chunk)` seam applied to each stream chunk
       (`nil` is the identity default).
-    * `persistence` / `notifier` / `pubsub` — wiring resolved at runtime; `nil`
-      falls back to the application-level configuration.
+    * `api_key` — the provider API key for this conversation's model calls: a string,
+      a **0-arity resolver fun** (re-evaluated on every model call, so a rotated key
+      takes effect on the next turn), or `nil` to fall back to ReqLLM's own key
+      resolution (per-provider app config / env). Passed to the provider as a
+      per-request option; **never persisted** — the Ecto adapter's settings sanitizer
+      drops it, so a conversation revived from persisted settings alone is key-less
+      and the host must re-pass a fresh config if it relies on per-conversation keys.
+    * `notifier` / `pubsub` — wiring resolved at runtime; `nil` falls back to
+      the application-level configuration.
 
   Like `tools`, `hooks`/`stream_transformer` are functions, not JSON-serializable;
   they live here and are rebuilt from config on revival (verbatim for the ETS adapter).
+  `api_key` is dropped on persistence even in its string form — key material never
+  lands in a durable row.
   """
 
   @type t :: %__MODULE__{
@@ -46,6 +55,7 @@ defmodule Agentix.Conversation.Config do
           tools: list(),
           hooks: [Agentix.Hook.t()],
           stream_transformer: (term() -> term()) | nil,
+          api_key: String.t() | (-> String.t()) | nil,
           working_budget: pos_integer(),
           injection_reserve: pos_integer(),
           tool_retention: %{mode: :age | :count, value: pos_integer(), never_evict: boolean()},
@@ -56,7 +66,6 @@ defmodule Agentix.Conversation.Config do
           retry:
             %{max_attempts: pos_integer(), base_ms: pos_integer(), max_ms: pos_integer()} | false,
           response_format: keyword() | map() | nil,
-          persistence: module() | {module(), keyword()} | nil,
           notifier: module() | nil,
           pubsub: atom() | nil
         }
@@ -83,6 +92,7 @@ defmodule Agentix.Conversation.Config do
     tools: [],
     hooks: [],
     stream_transformer: nil,
+    api_key: nil,
     working_budget: @default_working_budget,
     injection_reserve: @default_injection_reserve,
     tool_retention: @default_tool_retention,
@@ -92,7 +102,6 @@ defmodule Agentix.Conversation.Config do
     audit?: false,
     retry: @default_retry,
     response_format: nil,
-    persistence: nil,
     notifier: nil,
     pubsub: nil
   ]
@@ -105,9 +114,9 @@ defmodule Agentix.Conversation.Config do
   unknown keys. String keys naming a known field are accepted (so a config can be rebuilt
   from a persistence adapter that round-trips settings as JSON).
   """
-  @config_fields ~w(model system_prompt tools hooks stream_transformer working_budget
+  @config_fields ~w(model system_prompt tools hooks stream_transformer api_key working_budget
                     injection_reserve tool_retention compaction_window default_timeout
-                    hook_timeout audit? retry response_format persistence notifier pubsub)a
+                    hook_timeout audit? retry response_format notifier pubsub)a
   @field_strings Map.new(@config_fields, &{Atom.to_string(&1), &1})
 
   @spec new(keyword() | map()) :: t()
@@ -123,6 +132,7 @@ defmodule Agentix.Conversation.Config do
     validate_positive!(:hook_timeout, config.hook_timeout)
     validate_retention!(config.tool_retention)
     validate_transformer!(config.stream_transformer)
+    validate_api_key!(config.api_key)
     validate_retry!(config.retry)
     validate_response_format!(config.response_format)
     config
@@ -203,6 +213,18 @@ defmodule Agentix.Conversation.Config do
     raise ArgumentError,
           "tool_retention must be %{mode: :age | :count, value: pos_integer, " <>
             "never_evict: boolean}, got: #{inspect(other)}"
+  end
+
+  # `nil` defers to ReqLLM's own resolution; a resolver fun is re-evaluated per model
+  # call (rotation-friendly); an empty string is a caller bug, not a "no key" signal.
+  defp validate_api_key!(nil), do: :ok
+  defp validate_api_key!(key) when is_binary(key) and key != "", do: :ok
+  defp validate_api_key!(resolver) when is_function(resolver, 0), do: :ok
+
+  defp validate_api_key!(other) do
+    raise ArgumentError,
+          "api_key must be nil, a non-empty string, or a 0-arity resolver function, " <>
+            "got: #{inspect(other)}"
   end
 
   defp validate_transformer!(nil), do: :ok

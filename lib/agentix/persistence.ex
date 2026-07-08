@@ -131,6 +131,16 @@ defmodule Agentix.Persistence do
   """
   @callback gc_model_calls(conversation_id(), non_neg_integer()) :: {:ok, non_neg_integer()}
 
+  @doc """
+  Deletes the conversation and everything under it — events, summaries, tool
+  calls, and audit rows. The host owns retention: ephemeral one-shot tasks
+  call this after reading their usage so throwaway conversations never
+  accumulate. Idempotent; deleting an unknown id is `:ok`. Stop the live
+  agent first (`Agentix.Conversation.stop/1`) — deleting under a running
+  conversation is undefined.
+  """
+  @callback delete_conversation(conversation_id()) :: :ok
+
   @default_adapter Agentix.Persistence.ETS
 
   @doc "The configured persistence adapter module."
@@ -157,6 +167,9 @@ defmodule Agentix.Persistence do
   @spec put_conversation(conversation_id(), map()) :: :ok
   def put_conversation(conversation_id, attrs),
     do: adapter().put_conversation(conversation_id, attrs)
+
+  @spec delete_conversation(conversation_id()) :: :ok
+  def delete_conversation(conversation_id), do: adapter().delete_conversation(conversation_id)
 
   @spec put_fsm_state(conversation_id(), map()) :: :ok
   def put_fsm_state(conversation_id, fsm_state),

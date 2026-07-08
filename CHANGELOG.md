@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Removed the reserved `persistence` field from `Agentix.Conversation.Config`
+  (documented as unused in 0.3.0; it was never consulted). `Config.new/1` now
+  raises on a `:persistence` key — persistence is configured at the application
+  level only (`config :agentix, :persistence`), and ephemeral one-shots clean
+  up via `Agentix.Persistence.delete_conversation/1`.
+
+## [0.3.0] - 2026-07-07
+
+### Added
+
+- Per-conversation `api_key` on `Agentix.Conversation.Config` — a string or a
+  **0-arity resolver fun** (re-evaluated on every model call) passed to the
+  provider as a per-request option. `nil` keeps ReqLLM's own key resolution.
+  The Ecto persistence adapter's settings sanitizer drops it, so key material
+  never lands in a durable row; a conversation revived from persisted settings
+  alone is key-less and the host must re-pass a fresh `config:`.
+- `Agentix.Conversation.stop/1` — public verb to release an idle conversation's
+  agent process without ending the conversation (persisted events remain; the
+  next `ensure_started/2` revives it). Replaces hosts reaching into
+  `Agentix.Registry` / `Agentix.ConversationSupervisor` internals.
+- `{:turn_failed, turn_ref, reason}` live event — provider/stream failures now
+  get their own terminal event carrying the reason. Previously they broadcast
+  the same `{:cancelled, turn_ref}` as a user-initiated cancel, so consumers
+  could not distinguish "your key/provider failed" (e.g. an auth rejection)
+  from "you cancelled".
+
+### Changed
+
+- A per-conversation `api_key` resolver fun is now evaluated inside the
+  monitored streaming task: a raising resolver fails the turn
+  (`{:turn_failed, …}`) instead of crashing the conversation's agent process.
+- The ETS persistence owner now starts unconditionally (previously only when
+  ETS was the app-configured adapter), so ETS is usable in tests and tools
+  regardless of the app default.
+
+- `Config.persistence` is documented as **Reserved**: the agent persists
+  through the application-level adapter only; the field was never consulted
+  and the old doc implied otherwise.
+- Agents now trap exits: `Conversation.stop/1` and supervisor shutdown drain
+  the in-flight callback before terminating, so an agent mid-write to durable
+  persistence is never killed between statements (previously a stop could
+  sever a checked-out DB connection mid-query).
+
+### Breaking
+
+- New required `Agentix.Persistence` behaviour callback
+  `delete_conversation/1` (implemented by both bundled adapters): removes a
+  conversation and everything under it (events, summaries, tool calls, audit
+  rows) — ephemeral one-shot tasks call it after reading usage so throwaway
+  conversations never accumulate. Third-party adapters must implement it.
+- Turns that fail on a provider/stream error no longer emit
+  `{:cancelled, turn_ref}` — subscribe to `{:turn_failed, turn_ref, reason}`
+  for that terminal. `{:cancelled, …}` is now exclusively user-initiated.
+
 ## [0.2.0] - 2026-06-25
 
 ### Added

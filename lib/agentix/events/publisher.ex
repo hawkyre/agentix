@@ -21,6 +21,7 @@ defmodule Agentix.Events.Publisher do
           | {:suspended, String.t(), atom(), term()}
           | {:turn_completed, term()}
           | {:turn_halted, term(), term()}
+          | {:turn_failed, term(), term()}
           | {:cancelled, term()}
 
   @doc "The pub/sub topic for a conversation."
@@ -115,6 +116,14 @@ defmodule Agentix.Events.Publisher do
   @doc "Broadcasts that the turn was halted by a hook (the terminal for a halted turn)."
   @spec turn_halted(context(), term(), term()) :: :ok
   def turn_halted(ctx, turn_ref, reason), do: publish(ctx, {:turn_halted, turn_ref, reason})
+
+  @doc """
+  Broadcasts that the turn failed on a provider/stream error, carrying the reason
+  (the terminal for a failed turn — distinct from a user-initiated `cancelled`, so
+  consumers can tell "your key/provider is broken" from "you cancelled").
+  """
+  @spec turn_failed(context(), term(), term()) :: :ok
+  def turn_failed(ctx, turn_ref, reason), do: publish(ctx, {:turn_failed, turn_ref, reason})
 
   @doc "Broadcasts that the turn was cancelled."
   @spec cancelled(context(), term()) :: :ok

@@ -29,13 +29,10 @@ defmodule Agentix.Application do
   end
 
   # The ETS adapter needs an owner process for its tables; it must start before
-  # the conversation supervisor (agents touch the tables on start). Other adapters
-  # (e.g. Ecto) need no owner.
+  # the conversation supervisor (agents touch the tables on start). It starts
+  # UNCONDITIONALLY since 0.3.0 so ETS is usable in tests and tooling even when
+  # the app-configured adapter is Ecto. Idle empty tables cost nothing.
   defp persistence_children do
-    if Agentix.Persistence.adapter() == Agentix.Persistence.ETS do
-      [Agentix.Persistence.ETS.Owner]
-    else
-      []
-    end
+    [Agentix.Persistence.ETS.Owner]
   end
 end

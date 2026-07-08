@@ -198,5 +198,26 @@ defmodule Agentix.Persistence.ETS do
     {:ok, length(stale)}
   end
 
+  @impl true
+  def delete_conversation(conversation_id) do
+    Enum.each(all_tool_call_ids(conversation_id), &:ets.delete(@tool_calls, &1))
+    :ets.match_delete(@events, {{conversation_id, :_}, :_})
+    :ets.match_delete(@summaries, {{conversation_id, :_}, :_})
+    :ets.match_delete(@model_calls, {{conversation_id, :_}, :_})
+    :ets.delete(@conversations, {:seq, conversation_id})
+    :ets.delete(@conversations, conversation_id)
+    :ok
+  end
+
+  # Every tool-call id for the conversation, regardless of status. Full-table
+  # scan — @tool_calls is keyed by provider id only, and this path serves
+  # tests/one-shot cleanup, never a hot loop.
+  defp all_tool_call_ids(conversation_id) do
+    @tool_calls
+    |> :ets.tab2list()
+    |> Enum.filter(fn {_id, record} -> record.conversation_id == conversation_id end)
+    |> Enum.map(fn {id, _record} -> id end)
+  end
+
   defp audit_enabled?, do: Application.get_env(:agentix, :audit, false)
 end
