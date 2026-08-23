@@ -15,6 +15,7 @@ defmodule Agentix.Agent do
   alias Agentix.Persistence
   alias Agentix.Provider
   alias Agentix.Scope
+  alias Agentix.Telemetry
   alias Agentix.Tool
   alias Agentix.Tool.Dispatch
   alias Agentix.Turn
@@ -23,17 +24,6 @@ defmodule Agentix.Agent do
   alias ReqLLM.Message.ContentPart
 
   require Logger
-
-  defmodule StreamOpenError do
-    @moduledoc false
-    # Control-flow sentinel for the [:agentix, :model_call] span: a pre-stream
-    # {:error, reason} raises this inside the span fun so :telemetry.span/3 emits
-    # :exception for the attempt; the retry loop catches it and decides retry vs fail.
-    defexception [:reason]
-
-    @impl true
-    def message(%{reason: reason}), do: "provider stream open failed: #{inspect(reason)}"
-  end
 
   defmodule Data do
     @moduledoc false
@@ -459,7 +449,10 @@ defmodule Agentix.Agent do
     schema = turn.schema
     transformer = data.config.stream_transformer
     retry = data.config.retry
-    telemetry_meta = %{conversation_id: data.conversation_id, scope: turn.scope}
+    # Telemetry carries only scalar identity — never the raw Scope (its current_user /
+    # assigns routinely hold host PII and tool-auth credentials, and telemetry fans out
+    # to every attached handler).
+    telemetry_meta = %{conversation_id: data.conversation_id, system_call?: turn.scope.system?}
 
     %{pid: pid, ref: ref} =
       Task.Supervisor.async_nolink(Agentix.TaskSupervisor, fn ->
@@ -1069,18 +1062,16 @@ defmodule Agentix.Agent do
     started = System.monotonic_time()
 
     :telemetry.span([:agentix, :model_call], span_meta, fn ->
-      stream_attempt(env, span_meta, started)
+      open_and_consume_stream(env, span_meta, started)
     end)
-
-    :ok
   rescue
-    error in StreamOpenError -> handle_open_failure(env, attempt, error.reason)
+    error in Telemetry.StreamOpenError -> handle_open_failure(env, attempt, error.reason)
   end
 
   # The spanned work for one attempt: open the provider stream, forward the chunks
   # (through the stream-transformer seam — one `(chunk -> chunk)` pass per chunk,
   # identity when unset), finalize, and report back to the agent.
-  defp stream_attempt(env, span_meta, started) do
+  defp open_and_consume_stream(env, span_meta, started) do
     case Provider.stream(env.model, env.context, env.opts) do
       {:ok, stream} ->
         send(env.agent, {:stream_started, env.turn_ref, stream.cancel})
@@ -1094,20 +1085,20 @@ defmodule Agentix.Agent do
 
         measurements =
           usage
-          |> Agentix.Telemetry.usage_measurements()
+          |> Telemetry.usage_measurements()
           |> Map.put(:latency_ms, since_ms(started))
 
         metadata =
           Map.merge(span_meta, %{
             response: message,
-            finish_reason: Agentix.Telemetry.finish_reason(message),
+            finish_reason: Telemetry.finish_reason(message),
             usage: usage
           })
 
         {:ok, measurements, metadata}
 
       {:error, reason} ->
-        raise StreamOpenError, reason: reason
+        raise Telemetry.StreamOpenError, reason: reason
     end
   end
 

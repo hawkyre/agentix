@@ -75,13 +75,13 @@ defmodule Agentix.TelemetryTest do
         assert_receive {[:agentix, :model_call, :exception], ^ref, %{duration: _},
                         %{attempt: ^attempt, kind: :error, reason: reason, stacktrace: trace}}
 
-        assert %Agentix.Agent.StreamOpenError{reason: %{status: 503}} = reason
+        assert %Telemetry.StreamOpenError{reason: %{status: 503}} = reason
         assert is_list(trace)
       end
 
       # Attempt 3: start → stop with the usage measurements and the assembled response.
       assert_receive {[:agentix, :model_call, :start], ^ref, _measurements,
-                      %{attempt: 3, turn_ref: turn_ref, context: %Context{}, scope: %Scope{}}}
+                      %{attempt: 3, turn_ref: turn_ref, context: %Context{}, system_call?: false}}
 
       assert_receive {[:agentix, :model_call, :stop], ^ref, measurements, metadata}
 
@@ -126,6 +126,20 @@ defmodule Agentix.TelemetryTest do
       refute_receive {[:agentix, :model_call, :stop], ^ref, _, _}, 30
     end
 
+    test "metadata never exposes scope internals", %{id: id, ref: ref} do
+      MockProvider.script(completion("hi"))
+      {:ok, _pid} = Conversation.ensure_started(id, config: config())
+
+      scope = Scope.new(current_user: %{email: "victim@example.com"}, assigns: %{token: "s3cr3t"})
+      :ok = Conversation.send_message(id, "Hi", scope)
+      assert_receive {:turn_completed, _turn_ref}
+
+      assert_receive {[:agentix, :model_call, :start], ^ref, _measurements, metadata}
+      refute Map.has_key?(metadata, :scope)
+      refute inspect(Map.delete(metadata, :context)) =~ "s3cr3t"
+      assert metadata.system_call? == false
+    end
+
     test "spans fire with audit? off and write no model_calls rows", %{id: id, ref: ref} do
       MockProvider.script(completion("hi"))
       {:ok, _pid} = Conversation.ensure_started(id, config: config())
@@ -139,10 +153,11 @@ defmodule Agentix.TelemetryTest do
   end
 
   describe "usage mapping" do
-    test "accepts string keys and rejects non-integer values" do
+    test "accepts string keys, rejects non-integer and negative values" do
       assert %{input_tokens: 7, output_tokens: nil} =
                Telemetry.usage_measurements(%{"input_tokens" => 7, "output_tokens" => "bad"})
 
+      assert %{input_tokens: nil} = Telemetry.usage_measurements(%{input_tokens: -5})
       assert %{input_tokens: nil, cached_tokens: nil} = Telemetry.usage_measurements(nil)
     end
   end

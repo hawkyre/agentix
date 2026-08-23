@@ -1,9 +1,23 @@
+defmodule Agentix.Telemetry.StreamOpenError do
+  @moduledoc """
+  The exception a `[:agentix, :model_call, :exception]` event carries as its
+  `reason` when the provider stream failed to open (a pre-stream `{:error, reason}`
+  from the provider). The original provider error is in the `:reason` field. A
+  mid-stream crash carries the raised exception itself instead.
+  """
+
+  defexception [:reason]
+
+  @impl true
+  def message(%{reason: reason}), do: "provider stream open failed: #{inspect(reason)}"
+end
+
 defmodule Agentix.Telemetry do
   @moduledoc false
   # Nil-safe helpers for the [:agentix, :model_call] and [:agentix, :tool] telemetry
-  # events (documented in guides/telemetry.md). Nothing here may raise — a telemetry
-  # payload must never take down a turn, so every mapper degrades to nil on an
-  # unexpected shape.
+  # events, and owner of the payload shapes those events expose. Nothing here may
+  # raise — a telemetry payload must never take down a turn, so every mapper degrades
+  # to nil on an unexpected shape.
 
   alias ReqLLM.Message
 
@@ -28,7 +42,7 @@ defmodule Agentix.Telemetry do
 
   defp usage_field(usage, key) do
     case Map.get(usage, key, Map.get(usage, Atom.to_string(key))) do
-      value when is_integer(value) -> value
+      value when is_integer(value) and value >= 0 -> value
       _ -> nil
     end
   end
