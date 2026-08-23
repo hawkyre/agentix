@@ -24,6 +24,17 @@ defmodule Agentix.Agent do
 
   require Logger
 
+  defmodule StreamOpenError do
+    @moduledoc false
+    # Control-flow sentinel for the [:agentix, :model_call] span: a pre-stream
+    # {:error, reason} raises this inside the span fun so :telemetry.span/3 emits
+    # :exception for the attempt; the retry loop catches it and decides retry vs fail.
+    defexception [:reason]
+
+    @impl true
+    def message(%{reason: reason}), do: "provider stream open failed: #{inspect(reason)}"
+  end
+
   defmodule Data do
     @moduledoc false
     # FSM data. `turn` is `nil` outside a turn, else a map carrying the turn ref,
@@ -448,12 +459,12 @@ defmodule Agentix.Agent do
     schema = turn.schema
     transformer = data.config.stream_transformer
     retry = data.config.retry
-    conversation_id = data.conversation_id
+    telemetry_meta = %{conversation_id: data.conversation_id, scope: turn.scope}
 
     %{pid: pid, ref: ref} =
       Task.Supervisor.async_nolink(Agentix.TaskSupervisor, fn ->
         opts = stream_opts(config, schema)
-        run_stream(agent, turn.ref, model, context, opts, transformer, retry, conversation_id)
+        run_stream(agent, turn.ref, model, context, opts, transformer, retry, telemetry_meta)
       end)
 
     :telemetry.execute(
@@ -1028,72 +1039,99 @@ defmodule Agentix.Agent do
 
   ## Streaming task (runs under Agentix.TaskSupervisor)
 
-  defp run_stream(agent, turn_ref, model, context, opts, transformer, retry, conversation_id) do
+  defp run_stream(agent, turn_ref, model, context, opts, transformer, retry, telemetry_meta) do
     {policy, max_attempts} = retry_plan(retry)
 
-    case attempt_stream(model, context, opts, policy, turn_ref, conversation_id, 1, max_attempts) do
-      {:ok, stream} ->
-        send(agent, {:stream_started, turn_ref, stream.cancel})
+    env = %{
+      agent: agent,
+      turn_ref: turn_ref,
+      model: model,
+      context: context,
+      opts: opts,
+      transformer: transformer,
+      policy: policy,
+      max_attempts: max_attempts,
+      meta: Map.merge(telemetry_meta, %{turn_ref: turn_ref, model: model, context: context})
+    }
 
-        # The stream-transformer seam: one `(chunk -> chunk)` pass per chunk
-        # (identity when unset), applied here at the provider seam before forwarding.
-        # A failure during enumeration (after this point) crashes the task and fails the
-        # turn — it is never retried, since tokens may already have streamed to the client.
+    attempt_stream(env, 1)
+  end
+
+  # One [:agentix, :model_call] span per attempt, covering open → consume → finalize.
+  # A pre-stream {:error, reason} raises the StreamOpenError sentinel inside the span
+  # fun (the span ends in :exception) and is caught here, where the retry decision
+  # lives — so the existing [:agentix, :turn, :retry] event, the backoff sleep, and
+  # the recursion all sit outside the span. Any other raise (mid-stream enumeration,
+  # finalize) also ends the span in :exception, then propagates and crashes the task
+  # as before — never retried, since tokens may already have streamed to the client.
+  defp attempt_stream(env, attempt) do
+    span_meta = Map.put(env.meta, :attempt, attempt)
+    started = System.monotonic_time()
+
+    :telemetry.span([:agentix, :model_call], span_meta, fn ->
+      stream_attempt(env, span_meta, started)
+    end)
+
+    :ok
+  rescue
+    error in StreamOpenError -> handle_open_failure(env, attempt, error.reason)
+  end
+
+  # The spanned work for one attempt: open the provider stream, forward the chunks
+  # (through the stream-transformer seam — one `(chunk -> chunk)` pass per chunk,
+  # identity when unset), finalize, and report back to the agent.
+  defp stream_attempt(env, span_meta, started) do
+    case Provider.stream(env.model, env.context, env.opts) do
+      {:ok, stream} ->
+        send(env.agent, {:stream_started, env.turn_ref, stream.cancel})
+
         Enum.each(stream.chunks, fn chunk ->
-          send(agent, {:chunk, turn_ref, Hook.transform_chunk(chunk, transformer)})
+          send(env.agent, {:chunk, env.turn_ref, Hook.transform_chunk(chunk, env.transformer)})
         end)
 
         {message, usage} = stream.finalize.()
-        send(agent, {:stream_done, turn_ref, message, usage})
+        send(env.agent, {:stream_done, env.turn_ref, message, usage})
+
+        measurements =
+          usage
+          |> Agentix.Telemetry.usage_measurements()
+          |> Map.put(:latency_ms, since_ms(started))
+
+        metadata =
+          Map.merge(span_meta, %{
+            response: message,
+            finish_reason: Agentix.Telemetry.finish_reason(message),
+            usage: usage
+          })
+
+        {:ok, measurements, metadata}
 
       {:error, reason} ->
-        send(agent, {:stream_error, turn_ref, reason})
+        raise StreamOpenError, reason: reason
     end
   end
 
-  # Open the provider stream, retrying the *pre-stream* call on a transient error per the
-  # resolved `policy` map. `attempt` is 1-based; `max_attempts` of 1 means a single try.
-  defp attempt_stream(
-         model,
-         context,
-         opts,
-         policy,
-         turn_ref,
-         conversation_id,
-         attempt,
-         max_attempts
-       ) do
-    case Provider.stream(model, context, opts) do
-      {:ok, stream} ->
-        {:ok, stream}
+  # `attempt` is 1-based; `max_attempts` of 1 means a single try. A retried open
+  # produces a fresh :model_call span with `attempt` incremented.
+  defp handle_open_failure(env, attempt, reason) do
+    if attempt < env.max_attempts and Agentix.Retry.retryable?(reason) do
+      delay = Agentix.Retry.delay(attempt, env.policy, Agentix.Retry.retry_after_ms(reason))
 
-      {:error, reason} ->
-        if attempt < max_attempts and Agentix.Retry.retryable?(reason) do
-          delay = Agentix.Retry.delay(attempt, policy, Agentix.Retry.retry_after_ms(reason))
+      :telemetry.execute(
+        [:agentix, :turn, :retry],
+        %{attempt: attempt, delay_ms: delay},
+        %{conversation_id: env.meta.conversation_id, turn_ref: env.turn_ref, reason: reason}
+      )
 
-          :telemetry.execute(
-            [:agentix, :turn, :retry],
-            %{attempt: attempt, delay_ms: delay},
-            %{conversation_id: conversation_id, turn_ref: turn_ref, reason: reason}
-          )
-
-          Process.sleep(delay)
-
-          attempt_stream(
-            model,
-            context,
-            opts,
-            policy,
-            turn_ref,
-            conversation_id,
-            attempt + 1,
-            max_attempts
-          )
-        else
-          {:error, reason}
-        end
+      Process.sleep(delay)
+      attempt_stream(env, attempt + 1)
+    else
+      send(env.agent, {:stream_error, env.turn_ref, reason})
     end
   end
+
+  defp since_ms(started),
+    do: System.convert_time_unit(System.monotonic_time() - started, :native, :millisecond)
 
   # Resolve the config `retry` value into `{policy_map, max_attempts}`. `false` disables
   # retry: max_attempts is 1, so the policy map is inert (never reaches `delay/3`), but it
