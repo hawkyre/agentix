@@ -154,6 +154,7 @@ defmodule Agentix.MixProject do
           Agentix.Executor
         ],
         "Tools & HITL": [Agentix.Tool, Agentix.Turn],
+        Telemetry: [Agentix.Telemetry.StreamOpenError],
         Hooks: [Agentix.Hook, Agentix.Hook.OverflowError],
         "Compaction & tokens": [Agentix.Tokenizer, Agentix.Tokenizer.Heuristic],
         Persistence: [

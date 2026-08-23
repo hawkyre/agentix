@@ -360,6 +360,14 @@ defmodule Agentix.Agent do
     {:keep_state_and_data, [{:reply, from, live_turn_view(state, data)}]}
   end
 
+  # The conversation's tenant key, served from any state. `Conversation`'s
+  # running-agent check calls this instead of racing a durable read — the Registry
+  # name registers before `init/1` runs, so a persisted-record read could observe
+  # the pre-init nil; a call queues behind init and always sees the resolved key.
+  defp handle_common(_state, {:call, from}, :tenant_key, data) do
+    {:keep_state_and_data, [{:reply, from, data.config.tenant_key}]}
+  end
+
   # A `:server` tool reported progress via `Agentix.Turn.report_progress/2`; rebroadcast it on
   # the live plane while its turn is current. Served from any state (a tool can report while
   # the agent is executing other tools or awaiting input); stale signals fall through below.
@@ -1467,28 +1475,43 @@ defmodule Agentix.Agent do
   end
 
   defp reconcile_one({id, name}, data) do
+    record = Persistence.get_tool_call(id)
+    result = reconciled_result(record)
+
     {:ok, seq} =
       append_event(data, :tool_result, %{
         "tool_call_id" => id,
         "name" => name,
-        "result" => reconciled_result(id)
+        "result" => result
       })
+
+    # Close the [:agentix, :tool] span the pre-crash process opened for this call —
+    # every :start must get a terminal. The original start time and turn are
+    # unrecoverable across the crash, so duration is 0 and turn_ref is nil.
+    Telemetry.tool_stop(
+      %{
+        conversation_id: data.conversation_id,
+        turn_ref: nil,
+        tool_call_id: id,
+        name: name,
+        executor: record && record[:executor],
+        args: record && record[:args],
+        tenant_key: data.config.tenant_key
+      },
+      0,
+      result
+    )
 
     %{data | last_seq: seq}
   end
 
   # Prefer a durable terminal result (e.g. the durable expiry already resolved it);
   # otherwise the call was interrupted mid-run.
-  defp reconciled_result(id) do
-    case Persistence.get_tool_call(id) do
-      %{status: status, result: result}
-      when status in [:resolved, :errored, :expired] and not is_nil(result) ->
-        result
+  defp reconciled_result(%{status: status, result: result})
+       when status in [:resolved, :errored, :expired] and not is_nil(result), do: result
 
-      _ ->
-        %{ok: false, error: "tool call interrupted: agent restarted before it completed"}
-    end
-  end
+  defp reconciled_result(_record),
+    do: %{ok: false, error: "tool call interrupted: agent restarted before it completed"}
 
   # Rebuild the suspended turn: a `calls` entry per still-pending tool call, with the
   # `phase` restored so `handle_resolve/6` accepts the resolution. The pending records are
@@ -1627,16 +1650,19 @@ defmodule Agentix.Agent do
     max(event_max, summary_to)
   end
 
+  # One persisted-record fetch serves both the settings revival and the tenant merge.
   defp resolve_config(conversation_id, opts) do
-    with {:ok, config} <- base_config(conversation_id, opts) do
-      resolve_tenant_key(conversation_id, config, Keyword.get(opts, :tenant_key))
+    persisted = Persistence.get_conversation(conversation_id)
+
+    with {:ok, config} <- base_config(opts, persisted) do
+      resolve_tenant_key(config, Keyword.get(opts, :tenant_key), persisted_tenant_key(persisted))
     end
   end
 
-  defp base_config(conversation_id, opts) do
+  defp base_config(opts, persisted) do
     case Keyword.get(opts, :config) do
       %Config{} = config -> {:ok, config}
-      nil -> resolve_config_from_settings(conversation_id)
+      nil -> resolve_config_from_settings(persisted)
     end
   end
 
@@ -1645,31 +1671,22 @@ defmodule Agentix.Agent do
   # agree with the persisted record. The resolved config always folds the surviving
   # key in, so `init` re-persists it verbatim and a revived conversation keeps
   # stamping telemetry.
-  defp resolve_tenant_key(conversation_id, config, opt_key) do
+  defp resolve_tenant_key(config, opt_key, persisted_key) do
     TenantKey.validate!(opt_key)
 
     with {:ok, requested} <- TenantKey.merge(opt_key, config.tenant_key),
-         {:ok, key} <- TenantKey.merge(requested, persisted_tenant_key(conversation_id)) do
+         {:ok, key} <- TenantKey.merge(requested, persisted_key) do
       {:ok, %{config | tenant_key: key}}
     else
       :error -> {:error, :tenant_key_conflict}
     end
   end
 
-  defp persisted_tenant_key(conversation_id) do
-    case Persistence.get_conversation(conversation_id) do
-      %{tenant_key: key} -> key
-      _ -> nil
-    end
-  end
+  defp persisted_tenant_key(%{tenant_key: key}), do: key
+  defp persisted_tenant_key(_persisted), do: nil
 
-  defp resolve_config_from_settings(conversation_id) do
-    case Persistence.get_conversation(conversation_id) do
-      %{settings: settings} when is_map(settings) and map_size(settings) > 0 ->
-        {:ok, Config.new(settings)}
+  defp resolve_config_from_settings(%{settings: settings})
+       when is_map(settings) and map_size(settings) > 0, do: {:ok, Config.new(settings)}
 
-      _ ->
-        :error
-    end
-  end
+  defp resolve_config_from_settings(_persisted), do: :error
 end

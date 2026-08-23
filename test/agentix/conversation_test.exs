@@ -85,6 +85,31 @@ defmodule Agentix.ConversationTest do
         Conversation.stop(id)
       end
     end
+
+    test "concurrent ensure_started with the SAME key all succeed" do
+      # The Registry name registers before init/1 runs, so a racing caller can see the
+      # winner's pid while its tenant key is still unresolved. Checking against the
+      # persisted record there would read nil and manufacture a conflict for callers
+      # that agree; the check must consult the live process instead.
+      for _round <- 1..25 do
+        id = "conv-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+
+        results =
+          1..4
+          |> Enum.map(fn _ ->
+            Task.async(fn ->
+              Conversation.ensure_started(id, config: config(), tenant_key: "acme")
+            end)
+          end)
+          |> Task.await_many()
+
+        assert Enum.all?(results, &match?({:ok, _pid}, &1)),
+               "same-key racers must all succeed, got: #{inspect(results)}"
+
+        assert Persistence.get_conversation(id).tenant_key == "acme"
+        Conversation.stop(id)
+      end
+    end
   end
 
   defp wait_for_unregister(id, attempts \\ 200)

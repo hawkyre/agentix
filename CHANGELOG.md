@@ -27,8 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agentix_conversations` (and in settings, so revival keeps it) and stamped on
   all `:model_call`/`:tool` telemetry metadata. **Write-once**: a conflicting
   re-key returns `{:error, :tenant_key_conflict}` — including when racing
-  concurrent starts. `Agentix.Scope` gains a documented optional `tenant_key`
-  field (per-call context; never persisted, never on telemetry).
+  concurrent starts. `Agentix.Scope` gains an optional `tenant_key` field: when
+  the scope carries one and the call does not pass `tenant_key:` explicitly, the
+  entry verbs (`send_message/4`, `Agentix.resolve/4`) use the scope's key for the
+  write-once check — so authenticating the tenant into the scope is enough to get
+  tenant isolation on every call. The scope field itself is never persisted and
+  never broadcast on telemetry.
 - `Agentix.Persistence.delete_by_tenant/1` — deletes every conversation whose
   `tenant_key` matches, cascading to events, summaries, tool calls, and audit
   rows; returns `{:ok, count}`.
@@ -50,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ```
 
 - Removed the reserved `persistence` field from `Agentix.Conversation.Config`
-  (documented as unused in 0.3.0; it was never consulted). `Config.new/1` now
+  (documented as unused in 0.3.0; it was never consulted). `Agentix.Conversation.Config.new/1` now
   raises on a `:persistence` key — persistence is configured at the application
   level only (`config :agentix, :persistence`), and ephemeral one-shots clean
   up via `Agentix.Persistence.delete_conversation/1`.

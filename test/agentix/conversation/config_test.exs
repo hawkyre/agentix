@@ -195,4 +195,27 @@ defmodule Agentix.Conversation.ConfigTest do
       end
     end
   end
+
+  describe "tenant_key" do
+    test "accepts nil and a non-empty string" do
+      assert Config.new(model: "m").tenant_key == nil
+      assert Config.new(model: "m", tenant_key: "acme").tenant_key == "acme"
+    end
+
+    test "rejects an empty string and a non-string scalar" do
+      assert_raise ArgumentError, ~r/tenant_key must be/, fn ->
+        Config.new(model: "m", tenant_key: "")
+      end
+
+      assert_raise ArgumentError, ~r/tenant_key must be/, fn ->
+        Config.new(model: "m", tenant_key: :acme)
+      end
+    end
+
+    test "rejects a key too large for the indexed column" do
+      assert_raise ArgumentError, ~r/tenant_key must be/, fn ->
+        Config.new(model: "m", tenant_key: String.duplicate("a", 3000))
+      end
+    end
+  end
 end

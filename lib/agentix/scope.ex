@@ -16,10 +16,12 @@ defmodule Agentix.Scope do
   ## Optional fields
 
     * `tenant_key` — the acting tenant, for multi-tenant hosts (`nil` or a
-      non-empty string). Purely caller-side context (e.g. for authorization checks
-      inside `:server` tool callbacks); the conversation's own persisted tenant is
-      `Agentix.Conversation.Config.tenant_key`. Like the rest of the scope, it is
-      never persisted and never broadcast on telemetry.
+      non-empty string). Entry verbs (`send_message/4`, `resolve/4`) use it as the
+      default `tenant_key:` option when the caller passes none, so authenticating
+      the tenant into the scope is enough to get the write-once isolation check on
+      every call (an explicit option still wins). The conversation's own persisted
+      tenant is `Agentix.Conversation.Config.tenant_key`. Like the rest of the
+      scope, this field itself is never persisted and never broadcast on telemetry.
   """
 
   alias Agentix.TenantKey

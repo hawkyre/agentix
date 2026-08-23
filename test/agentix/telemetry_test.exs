@@ -231,6 +231,26 @@ defmodule Agentix.TelemetryTest do
       refute_receive {[:agentix, :tool, :stop], ^ref, %{}, %{tool_call_id: ^tool_call_id}}, 30
     end
 
+    test "revival closes the span of a call the crash interrupted", %{id: id, ref: ref} do
+      # A :server tool in flight when the agent died leaves a :tool_call event with no
+      # result — and a [:agentix, :tool, :start] the dead process already emitted.
+      # Reconciliation must close that span rather than leaking it forever.
+      {:ok, _seq} =
+        Agentix.Persistence.append_event(
+          id,
+          Agentix.Event.new(:tool_call, %{
+            "tool_call_id" => "call_x",
+            "name" => "weather",
+            "args" => %{}
+          })
+        )
+
+      {:ok, _pid} = Conversation.ensure_started(id, config: config())
+
+      assert_receive {[:agentix, :tool, :stop], ^ref, %{duration: 0},
+                      %{tool_call_id: "call_x", name: "weather", turn_ref: nil, status: :error}}
+    end
+
     test "an unknown tool closes its span with an error status", %{id: id, ref: ref} do
       MockProvider.script([completion("", tool_calls: [{"nope", %{}}]), completion("ok")])
       {:ok, _pid} = Conversation.ensure_started(id, config: config())
@@ -266,6 +286,29 @@ defmodule Agentix.TelemetryTest do
       assert {:error, :tenant_key_conflict} = Conversation.ensure_started(id, tenant_key: "other")
       :ok = Conversation.stop(id)
       assert {:error, :tenant_key_conflict} = Conversation.ensure_started(id, tenant_key: "other")
+    end
+
+    test "a scope's tenant_key keys the conversation and gates later calls", %{id: id, ref: ref} do
+      MockProvider.script([completion("one"), completion("two")])
+      scope = Scope.new(current_user: %{id: 1}, tenant_key: "acme")
+
+      # No tenant_key: option — the scope's key supplies it.
+      :ok = Conversation.send_message(id, "Hi", scope, config: config())
+      assert_receive {:turn_completed, _turn_ref}
+
+      assert Agentix.Persistence.get_conversation(id).tenant_key == "acme"
+      assert_receive {[:agentix, :model_call, :start], ^ref, _measurements, %{tenant_key: "acme"}}
+
+      # The same scope keeps working; another tenant's scope is refused.
+      assert :ok = Conversation.send_message(id, "Again", scope)
+      assert_receive {:turn_completed, _turn_ref}
+
+      assert {:error, :tenant_key_conflict} =
+               Conversation.send_message(id, "Nope", Scope.new(tenant_key: "other"))
+
+      # An explicit option still wins over the scope.
+      assert {:error, :tenant_key_conflict} =
+               Conversation.send_message(id, "Nope", scope, tenant_key: "other")
     end
 
     test "untenanted conversations stamp nil", %{id: id, ref: ref} do

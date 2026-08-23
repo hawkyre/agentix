@@ -64,7 +64,10 @@ Notes:
   * On `:exception`, `reason` is `Agentix.Telemetry.StreamOpenError` when the
     stream failed to open (the original provider error is in its `reason` field —
     these are the attempts the retry policy may re-issue), or the raised exception
-    itself for a mid-stream crash.
+    itself for a mid-stream crash. A provider error struct typically carries the
+    request body it failed on, so `reason` is prompt-bearing too: redact it
+    wherever you redact `context` (it carries no API key — providers report
+    response headers only).
   * A turn cancelled mid-stream kills the streaming task, so that attempt's span
     gets **no terminal event** — the turn-level terminal is the
     `{:cancelled, turn_ref}` live event.
@@ -91,12 +94,15 @@ arguments, and an unknown tool all emit `:stop` with `status: :error`;
 `:exception` fires only when a `:server` tool's task dies abnormally (a raise
 inside the callback is rescued into an error result — that is a `:stop`).
 
-Span-balance gaps to know about:
+Across an agent crash the original `:start`'s clock and turn are unrecoverable, so
+revival closes the books approximately:
 
-  * An agent killed while suspended re-opens the tool span on revival — post-revival
-    `latency_ms` measures from revival, not from the original suspension.
-  * A call resolved by the durable expiry while the agent was dead is reconciled
-    into the log on revival with **no** telemetry events.
+  * A **suspended** call re-opens its span on revival (a second `:start`), and its
+    eventual `latency_ms` measures from revival, not from the original suspension.
+  * A call that was **in flight or already resolved durably** when the agent died is
+    reconciled on revival: the span closes with a `:stop` carrying `duration: 0` and
+    `turn_ref: nil`, since neither is knowable after the crash. Treat a zero-duration
+    tool span as "closed by recovery", not as a real measurement.
 
 ## Worked example: PostHog LLM analytics
 
@@ -133,9 +139,10 @@ conversation-to-user mapping (Agentix does not broadcast the caller's scope).
             "$ai_output_tokens": measurements.output_tokens,
             "$ai_latency": measurements.latency_ms / 1000,
             # Full prompt/response content — REDACT or drop these two if your
-            # PostHog project must not hold conversation content.
-            "$ai_input": Jason.encode!(Agentix.Codec.encode!(metadata.context)),
-            "$ai_output_choices": Jason.encode!(Agentix.Codec.encode!(metadata.response)),
+            # PostHog project must not hold conversation content. PostHog expects
+            # native arrays of %{role, content}, not JSON strings.
+            "$ai_input": Enum.map(metadata.context.messages, &message_property/1),
+            "$ai_output_choices": [message_property(metadata.response)],
             tenant_key: metadata[:tenant_key]
           }
         }
@@ -160,6 +167,13 @@ conversation-to-user mapping (Agentix does not broadcast the caller's scope).
 
         Task.Supervisor.start_child(MyApp.TaskSupervisor, fn -> MyApp.PostHog.capture(event) end)
         :ok
+      end
+
+      # A ReqLLM message's content is a list of parts; keep the text ones and drop
+      # the rest (images, files) rather than shipping binaries to analytics.
+      defp message_property(%ReqLLM.Message{role: role, content: content}) do
+        text = content |> Enum.filter(&(&1.type == :text)) |> Enum.map_join(& &1.text)
+        %{role: to_string(role), content: text}
       end
     end
 

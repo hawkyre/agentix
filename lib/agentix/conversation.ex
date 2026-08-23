@@ -12,7 +12,6 @@ defmodule Agentix.Conversation do
   """
 
   alias Agentix.Agent
-  alias Agentix.Persistence
   alias Agentix.Scope
   alias Agentix.TenantKey
 
@@ -39,22 +38,36 @@ defmodule Agentix.Conversation do
     TenantKey.validate!(tenant_opt)
 
     case lookup_agent(conversation_id) do
-      {:ok, pid} -> check_running_tenant(conversation_id, tenant_opt, pid)
+      {:ok, pid} -> check_running_tenant(conversation_id, opts, pid)
       :error -> start_agent(conversation_id, opts)
     end
   end
 
   # The agent is already running, so a tenant_key opt can no longer change anything —
-  # it must match the persisted key exactly. Deliberately stricter than
+  # it must match the agent's key exactly. Deliberately stricter than
   # `Agentix.TenantKey.merge/2`: a running agent's in-memory config cannot be
   # re-keyed, so late-keying a running unkeyed conversation is refused too.
-  defp check_running_tenant(_conversation_id, nil, pid), do: {:ok, pid}
+  #
+  # The key is read from the live process, not the persisted record: the Registry
+  # name registers before `init/1` runs, so a durable read here can race a
+  # still-initializing winner (observing nil and manufacturing a spurious
+  # conflict); a `:gen_statem.call` queues behind init and always sees the
+  # resolved key.
+  defp check_running_tenant(conversation_id, opts, pid) do
+    case Keyword.get(opts, :tenant_key) do
+      nil ->
+        {:ok, pid}
 
-  defp check_running_tenant(conversation_id, key, pid) do
-    case Persistence.get_conversation(conversation_id) do
-      %{tenant_key: ^key} -> {:ok, pid}
-      _ -> {:error, :tenant_key_conflict}
+      key ->
+        case :gen_statem.call(Agent.via(conversation_id), :tenant_key) do
+          ^key -> {:ok, pid}
+          _other -> {:error, :tenant_key_conflict}
+        end
     end
+  catch
+    # The agent exited between discovery and the call — start over; the fresh
+    # attempt resolves the key through init's own write-once merge.
+    :exit, _reason -> ensure_started(conversation_id, opts)
   end
 
   @doc """
@@ -68,16 +81,31 @@ defmodule Agentix.Conversation do
       JSON Schema map makes the model return a conforming object (surfaced via
       `Agentix.object/1`); `false` opts out of the conversation's `response_format`
       default for this one turn. Omitting it uses that default (or plain text).
+
+  When `scope` carries a `tenant_key` and `opts` do not, the scope's key is used
+  as the call's `tenant_key:` — so a host that authenticates the tenant into the
+  scope gets the write-once isolation check on every send without extra plumbing.
+  An explicit `tenant_key:` opt always wins.
   """
   @spec send_message(String.t(), message(), Scope.t(), keyword()) :: :ok | {:error, term()}
   def send_message(conversation_id, message, %Scope{} = scope, opts \\ []) do
     turn_opts = Keyword.take(opts, [:schema])
     validate_turn_opts!(turn_opts)
+    opts = default_tenant_from_scope(opts, scope)
 
     with {:ok, _pid} <- ensure_started(conversation_id, opts) do
       :gen_statem.call(Agent.via(conversation_id), {:send_message, message, scope, turn_opts})
     end
   end
+
+  @doc false
+  # The scope's tenant doubles as the call's tenant check unless the caller passed
+  # an explicit option. Shared with `Agentix.Resolve`.
+  @spec default_tenant_from_scope(keyword(), Scope.t()) :: keyword()
+  def default_tenant_from_scope(opts, %Scope{tenant_key: nil}), do: opts
+
+  def default_tenant_from_scope(opts, %Scope{tenant_key: key}),
+    do: Keyword.put_new(opts, :tenant_key, key)
 
   # Validate the per-turn `:schema` at the boundary (the config-level default is validated
   # in `Config.new/2`; a per-turn override must meet the same bar, plus `false`/`nil` to opt
@@ -155,10 +183,10 @@ defmodule Agentix.Conversation do
         {:ok, pid}
 
       {:error, {:already_started, pid}} ->
-        # Lost a start race: the winner's init has already resolved (and persisted)
-        # the tenant key, so this caller's opt must be re-checked — returning
-        # {:ok, pid} blindly would silently discard a conflicting key.
-        check_running_tenant(conversation_id, Keyword.get(opts, :tenant_key), pid)
+        # Lost a start race: this caller's tenant opt must be re-checked against
+        # the winner — returning {:ok, pid} blindly would silently discard a
+        # conflicting key.
+        check_running_tenant(conversation_id, opts, pid)
 
       {:error, reason} when reason in [:unknown_conversation, {:shutdown, :unknown_conversation}] ->
         {:error, :unknown_conversation}
