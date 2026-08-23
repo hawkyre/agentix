@@ -36,15 +36,19 @@ defmodule Agentix.TelemetryTest do
   alias Agentix.Telemetry
   alias Agentix.TelemetryTest.CrashProvider
   alias Agentix.Test.MockProvider
+  alias Agentix.Tool
   alias ReqLLM.Context
   alias ReqLLM.Message
 
   @fast_retry %{max_attempts: 3, base_ms: 1, max_ms: 5}
 
-  @model_call_events [
+  @telemetry_events [
     [:agentix, :model_call, :start],
     [:agentix, :model_call, :stop],
-    [:agentix, :model_call, :exception]
+    [:agentix, :model_call, :exception],
+    [:agentix, :tool, :start],
+    [:agentix, :tool, :stop],
+    [:agentix, :tool, :exception]
   ]
 
   setup do
@@ -52,7 +56,7 @@ defmodule Agentix.TelemetryTest do
     id = "conv-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
     Phoenix.PubSub.subscribe(Agentix.PubSub, Publisher.topic(id))
 
-    handler_ref = :telemetry_test.attach_event_handlers(self(), @model_call_events)
+    handler_ref = :telemetry_test.attach_event_handlers(self(), @telemetry_events)
     {:ok, id: id, ref: handler_ref}
   end
 
@@ -149,6 +153,94 @@ defmodule Agentix.TelemetryTest do
 
       assert_receive {[:agentix, :model_call, :stop], ^ref, _measurements, _metadata}
       assert Agentix.Persistence.model_calls(id) == []
+    end
+  end
+
+  describe "[:agentix, :tool] spans" do
+    test "a :server tool emits start and stop with its result", %{id: id, ref: ref} do
+      echo =
+        Tool.new(name: "echo", executor: :server, callback: fn args, _t -> {:ok, args["q"]} end)
+
+      MockProvider.script([
+        completion("", tool_calls: [{"echo", %{"q" => "x"}}]),
+        completion("done")
+      ])
+
+      {:ok, _pid} = Conversation.ensure_started(id, config: config(tools: [echo]))
+
+      :ok = Conversation.send_message(id, "Hi", Scope.new())
+      assert_receive {:turn_completed, _turn_ref}
+
+      assert_receive {[:agentix, :tool, :start], ^ref, %{system_time: _}, metadata}
+
+      assert %{conversation_id: ^id, name: "echo", executor: :server, args: %{"q" => "x"}} =
+               metadata
+
+      refute Map.has_key?(metadata, :scope)
+      tool_call_id = metadata.tool_call_id
+
+      assert_receive {[:agentix, :tool, :stop], ^ref, measurements,
+                      %{tool_call_id: ^tool_call_id, status: :ok, result: %{ok: true, result: "x"}}}
+
+      assert is_integer(measurements.duration)
+      assert is_integer(measurements.latency_ms) and measurements.latency_ms >= 0
+    end
+
+    test "a :human tool's span covers the suspension", %{id: id, ref: ref} do
+      ask = Tool.new(name: "ask", executor: :human)
+
+      MockProvider.script([
+        completion("", tool_calls: [{"ask", %{"q" => "name?"}}]),
+        completion("thanks")
+      ])
+
+      {:ok, _pid} = Conversation.ensure_started(id, config: config(tools: [ask]))
+
+      :ok = Conversation.send_message(id, "Hi", Scope.new())
+
+      assert_receive {[:agentix, :tool, :start], ^ref, _measurements,
+                      %{name: "ask", executor: :human, tool_call_id: tool_call_id}}
+
+      wait_ms = 30
+      Process.sleep(wait_ms)
+      assert :ok = Agentix.resolve(id, tool_call_id, "Bob")
+      assert_receive {:turn_completed, _turn_ref}
+
+      assert_receive {[:agentix, :tool, :stop], ^ref, measurements,
+                      %{tool_call_id: ^tool_call_id, status: :ok}}
+
+      assert measurements.latency_ms >= wait_ms
+    end
+
+    test "a killed :server tool task emits :exception, not :stop", %{id: id, ref: ref} do
+      dying = Tool.new(name: "dying", executor: :server, callback: fn _a, _t -> exit(:boom) end)
+      MockProvider.script([completion("", tool_calls: [{"dying", %{}}]), completion("recovered")])
+      {:ok, _pid} = Conversation.ensure_started(id, config: config(tools: [dying]))
+
+      :ok = Conversation.send_message(id, "Hi", Scope.new())
+      assert_receive {:turn_completed, _turn_ref}
+
+      assert_receive {[:agentix, :tool, :start], ^ref, _measurements,
+                      %{name: "dying", tool_call_id: tool_call_id}}
+
+      assert_receive {[:agentix, :tool, :exception], ^ref, %{duration: _},
+                      %{tool_call_id: ^tool_call_id, kind: :exit, reason: :boom, stacktrace: []}}
+
+      refute_receive {[:agentix, :tool, :stop], ^ref, %{}, %{tool_call_id: ^tool_call_id}}, 30
+    end
+
+    test "an unknown tool closes its span with an error status", %{id: id, ref: ref} do
+      MockProvider.script([completion("", tool_calls: [{"nope", %{}}]), completion("ok")])
+      {:ok, _pid} = Conversation.ensure_started(id, config: config())
+
+      :ok = Conversation.send_message(id, "Hi", Scope.new())
+      assert_receive {:turn_completed, _turn_ref}
+
+      assert_receive {[:agentix, :tool, :start], ^ref, _measurements,
+                      %{name: "nope", executor: nil}}
+
+      assert_receive {[:agentix, :tool, :stop], ^ref, _stop_measurements,
+                      %{name: "nope", status: :error, result: %{ok: false}}}
     end
   end
 

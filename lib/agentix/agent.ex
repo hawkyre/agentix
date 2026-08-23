@@ -657,7 +657,7 @@ defmodule Agentix.Agent do
           append_event(data, :tool_call, %{"tool_call_id" => id, "name" => name, "args" => %{}})
 
         %{data | last_seq: seq}
-        |> update_call(id, call_entry(nil, name, %{}, :done))
+        |> begin_call(id, call_entry(nil, name, %{}, :done))
         |> do_record_result(id, %{ok: false, error: "invalid tool arguments"})
     end
   end
@@ -666,7 +666,7 @@ defmodule Agentix.Agent do
   # pair stays intact (providers reject orphan tool_calls).
   defp start_call(data, id, name, nil, args) do
     data
-    |> update_call(id, call_entry(nil, name, args, :done))
+    |> begin_call(id, call_entry(nil, name, args, :done))
     |> do_record_result(id, %{ok: false, error: "unknown tool: #{name}"})
   end
 
@@ -674,7 +674,7 @@ defmodule Agentix.Agent do
   # dispatches it locally (a full provider-tool round-trip is not yet implemented).
   defp start_call(data, id, name, %Tool{executor: :provider} = tool, args) do
     data
-    |> update_call(id, call_entry(tool, name, args, :done))
+    |> begin_call(id, call_entry(tool, name, args, :done))
     |> do_record_result(id, %{ok: true, result: nil})
   end
 
@@ -688,7 +688,7 @@ defmodule Agentix.Agent do
 
     data
     |> track_task(task.ref, id)
-    |> update_call(id, call_entry(tool, name, args, :running, task: task))
+    |> begin_call(id, call_entry(tool, name, args, :running, task: task))
   end
 
   # Everything else suspends and awaits an external resolution: gated `:server` /
@@ -717,7 +717,7 @@ defmodule Agentix.Agent do
     # `revive_awaiting/2`). Both are cancelled on any terminal outcome.
     timer = arm_timeout(data, id)
     Persistence.schedule_expiry(data.conversation_id, id, data.config.default_timeout)
-    update_call(data, id, call_entry(tool, name, args, phase, timer: timer))
+    begin_call(data, id, call_entry(tool, name, args, phase, timer: timer))
   end
 
   # Resolution arrived for a pending call. Reply `:ok` immediately, then advance.
@@ -781,7 +781,7 @@ defmodule Agentix.Agent do
 
   # Records a terminal result for a call: writes the paired `:tool_result` event,
   # clears any durable pending record, broadcasts, and marks the call done.
-  defp do_record_result(data, id, result) do
+  defp do_record_result(data, id, result, opts \\ []) do
     call = current_call(data, id)
     cancel_timer(call.timer)
     # A `timer` means this call was suspended, so it also has a durable expiry to cancel.
@@ -799,6 +799,9 @@ defmodule Agentix.Agent do
 
     Persistence.resolve_tool_call(id, result_status(result), result)
     broadcast_result(data.publisher, id, result)
+    # `telemetry: false` when the caller already closed the span (`tool_task_down`
+    # emits :exception instead) — a span gets exactly one terminal event.
+    if Keyword.get(opts, :telemetry, true), do: emit_tool_stop(data, id, call, result)
     update_call(%{data | last_seq: seq}, id, %{call | phase: :done, result: result, timer: nil})
   end
 
@@ -823,8 +826,12 @@ defmodule Agentix.Agent do
         :keep_state_and_data
 
       id ->
+        emit_tool_exception(data, id, current_call(data, id), reason)
+
         data
-        |> do_record_result(id, %{ok: false, error: "tool crashed: #{inspect(reason)}"})
+        |> do_record_result(id, %{ok: false, error: "tool crashed: #{inspect(reason)}"},
+          telemetry: false
+        )
         |> advance(from_state)
     end
   end
@@ -883,9 +890,70 @@ defmodule Agentix.Agent do
       phase: phase,
       task: Keyword.get(opts, :task),
       result: nil,
-      timer: Keyword.get(opts, :timer)
+      timer: Keyword.get(opts, :timer),
+      # [:agentix, :tool] span origin — one span per tool_call_id, from entry
+      # creation (dispatch or suspension) to its terminal in `do_record_result` /
+      # `tool_task_down`. A revived entry re-stamps here, so post-revival latency
+      # measures from revival (the pre-crash wait is not recoverable).
+      started: System.monotonic_time()
     }
   end
+
+  # Registers a fresh call entry and opens its [:agentix, :tool] span.
+  defp begin_call(data, id, entry) do
+    emit_tool_start(data, id, entry)
+    update_call(data, id, entry)
+  end
+
+  defp tool_meta(data, id, call) do
+    %{
+      conversation_id: data.conversation_id,
+      turn_ref: data.turn.ref,
+      tool_call_id: id,
+      name: call.name,
+      executor: call.tool && call.tool.executor,
+      args: call.args
+    }
+  end
+
+  defp emit_tool_start(data, id, entry) do
+    :telemetry.execute(
+      [:agentix, :tool, :start],
+      %{system_time: System.system_time()},
+      tool_meta(data, id, entry)
+    )
+  end
+
+  defp emit_tool_stop(data, id, call, result) do
+    duration = System.monotonic_time() - call.started
+
+    :telemetry.execute(
+      [:agentix, :tool, :stop],
+      %{duration: duration, latency_ms: to_ms(duration)},
+      data
+      |> tool_meta(id, call)
+      |> Map.merge(%{result: result, status: tool_result_status(result)})
+    )
+  end
+
+  defp emit_tool_exception(data, id, call, reason) do
+    {cause, stacktrace} = crash_details(reason)
+    duration = System.monotonic_time() - call.started
+
+    :telemetry.execute(
+      [:agentix, :tool, :exception],
+      %{duration: duration},
+      data
+      |> tool_meta(id, call)
+      |> Map.merge(%{kind: :exit, reason: cause, stacktrace: stacktrace})
+    )
+  end
+
+  # An abnormal task exit is either `{exception_or_reason, stacktrace}` or a bare term.
+  defp crash_details({reason, stacktrace}) when is_list(stacktrace), do: {reason, stacktrace}
+  defp crash_details(reason), do: {reason, []}
+
+  defp to_ms(duration), do: System.convert_time_unit(duration, :native, :millisecond)
 
   defp update_call(data, id, entry) do
     %{data | turn: %{data.turn | calls: Map.put(data.turn.calls, id, entry)}}
@@ -1121,8 +1189,7 @@ defmodule Agentix.Agent do
     end
   end
 
-  defp since_ms(started),
-    do: System.convert_time_unit(System.monotonic_time() - started, :native, :millisecond)
+  defp since_ms(started), do: to_ms(System.monotonic_time() - started)
 
   # Resolve the config `retry` value into `{policy_map, max_attempts}`. `false` disables
   # retry: max_attempts is 1, so the policy map is inert (never reaches `delay/3`), but it
@@ -1464,7 +1531,11 @@ defmodule Agentix.Agent do
         {call.id, call_entry(find_tool(data.config, name), name, call.args, phase, timer: timer)}
       end)
 
-    {:awaiting_input, %{data | turn: %{data.turn | calls: calls}}, []}
+    data = %{data | turn: %{data.turn | calls: calls}}
+    # Re-open each restored call's [:agentix, :tool] span (the pre-kill process's
+    # span is unrecoverable); latency measures from revival.
+    Enum.each(calls, fn {id, entry} -> emit_tool_start(data, id, entry) end)
+    {:awaiting_input, data, []}
   end
 
   defp fsm_pending(conversation_id) do
