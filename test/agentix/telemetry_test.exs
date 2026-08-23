@@ -244,6 +244,38 @@ defmodule Agentix.TelemetryTest do
     end
   end
 
+  describe "tenant_key" do
+    test "stamps model_call and tool metadata and is write-once", %{id: id, ref: ref} do
+      echo = Tool.new(name: "echo", executor: :server, callback: fn _a, _t -> {:ok, 1} end)
+      MockProvider.script([completion("", tool_calls: [{"echo", %{}}]), completion("done")])
+
+      {:ok, _pid} =
+        Conversation.ensure_started(id, config: config(tools: [echo]), tenant_key: "acme")
+
+      :ok = Conversation.send_message(id, "Hi", Scope.new())
+      assert_receive {:turn_completed, _turn_ref}
+
+      assert_receive {[:agentix, :model_call, :start], ^ref, _m1, %{tenant_key: "acme"}}
+      assert_receive {[:agentix, :tool, :start], ^ref, _m2, %{tenant_key: "acme"}}
+      assert Agentix.Persistence.get_conversation(id).tenant_key == "acme"
+
+      # Write-once: same key is a no-op, a different key conflicts — running or revived.
+      assert {:ok, _pid} = Conversation.ensure_started(id, tenant_key: "acme")
+      assert {:error, :tenant_key_conflict} = Conversation.ensure_started(id, tenant_key: "other")
+      :ok = Conversation.stop(id)
+      assert {:error, :tenant_key_conflict} = Conversation.ensure_started(id, tenant_key: "other")
+    end
+
+    test "untenanted conversations stamp nil", %{id: id, ref: ref} do
+      MockProvider.script(completion("hi"))
+      {:ok, _pid} = Conversation.ensure_started(id, config: config())
+
+      :ok = Conversation.send_message(id, "Hi", Scope.new())
+      assert_receive {:turn_completed, _turn_ref}
+      assert_receive {[:agentix, :model_call, :start], ^ref, _measurements, %{tenant_key: nil}}
+    end
+  end
+
   describe "usage mapping" do
     test "accepts string keys, rejects non-integer and negative values" do
       assert %{input_tokens: 7, output_tokens: nil} =

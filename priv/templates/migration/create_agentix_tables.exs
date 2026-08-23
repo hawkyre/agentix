@@ -18,8 +18,11 @@ defmodule Agentix.Repo.Migrations.CreateAgentixTables do
       add(:settings, :map, null: false, default: %{})
       add(:fsm_state, :map, null: false, default: %{})
       add(:status, :text, null: false, default: "active")
+      add(:tenant_key, :text)
       timestamps(type: :utc_datetime_usec)
     end
+
+    create(index(:agentix_conversations, [:tenant_key]))
 
     create(
       constraint(:agentix_conversations, :agentix_conversations_status,

@@ -12,6 +12,7 @@ if Code.ensure_loaded?(Ecto.Schema) do
       field(:settings, :map, default: %{})
       field(:fsm_state, :map, default: %{})
       field(:status, Ecto.Enum, values: [:active, :suspended, :idle, :ended], default: :active)
+      field(:tenant_key, :string)
       timestamps(type: :utc_datetime_usec)
     end
   end

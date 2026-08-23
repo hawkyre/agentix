@@ -45,7 +45,7 @@ alongside the existing `[:agentix, :turn, :retry]` event.
 
 Shared metadata on all three events: `conversation_id`, `turn_ref`, `attempt`
 (1-based), `model`, `context` (the rendered `ReqLLM.Context` actually sent),
-`system_call?`, and `tenant_key` when the conversation carries one.
+`system_call?`, and `tenant_key` (nil when the conversation has none).
 
 | event | measurements | metadata adds |
 | ----- | ------------ | ------------- |
@@ -78,7 +78,7 @@ An approval-gated call is a single span covering approval plus execution.
 
 Shared metadata: `conversation_id`, `turn_ref`, `tool_call_id`, `name`, `executor`
 (`:server | :human | :client | :provider`, `nil` for a tool the model hallucinated),
-`args`, and `tenant_key` when present.
+`args`, and `tenant_key` (nil when the conversation has none).
 
 | event | measurements | metadata adds |
 | ----- | ------------ | ------------- |

@@ -12,6 +12,8 @@ defmodule Agentix.Conversation do
   """
 
   alias Agentix.Agent
+  alias Agentix.Conversation.Config
+  alias Agentix.Persistence
   alias Agentix.Scope
 
   @typedoc "A user message — plain text or a prebuilt `ReqLLM.Message`."
@@ -23,12 +25,34 @@ defmodule Agentix.Conversation do
   For a brand-new conversation pass `config: %Agentix.Conversation.Config{}`. On
   revival the config is rebuilt from the persisted settings, so `:config` may be
   omitted; without either, `{:error, :unknown_conversation}` is returned.
+
+  `tenant_key: "acme"` sets the conversation's owning tenant (see
+  `Agentix.Conversation.Config`). Write-once: setting it when the conversation
+  starts (or revives) unkeyed, and re-passing the same value, is fine; a
+  conflicting value returns `{:error, :tenant_key_conflict}`. Keying a currently
+  **running** unkeyed conversation is also a conflict — stop the agent first so
+  the key applies on revival.
   """
   @spec ensure_started(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def ensure_started(conversation_id, opts \\ []) when is_binary(conversation_id) do
+    tenant_opt = Keyword.get(opts, :tenant_key)
+    Config.validate_tenant_key!(tenant_opt)
+
     case lookup_agent(conversation_id) do
-      {:ok, pid} -> {:ok, pid}
+      {:ok, pid} -> check_running_tenant(conversation_id, tenant_opt, pid)
       :error -> start_agent(conversation_id, opts)
+    end
+  end
+
+  # The agent is already running, so a tenant_key opt can no longer change anything —
+  # it must match the persisted key exactly (write-once; and a running agent's
+  # in-memory config cannot be re-keyed, so keying an unkeyed one is refused too).
+  defp check_running_tenant(_conversation_id, nil, pid), do: {:ok, pid}
+
+  defp check_running_tenant(conversation_id, key, pid) do
+    case Persistence.get_conversation(conversation_id) do
+      %{tenant_key: ^key} -> {:ok, pid}
+      _ -> {:error, :tenant_key_conflict}
     end
   end
 
@@ -134,6 +158,9 @@ defmodule Agentix.Conversation do
 
       {:error, reason} when reason in [:unknown_conversation, {:shutdown, :unknown_conversation}] ->
         {:error, :unknown_conversation}
+
+      {:error, reason} when reason in [:tenant_key_conflict, {:shutdown, :tenant_key_conflict}] ->
+        {:error, :tenant_key_conflict}
 
       :ignore ->
         {:error, :ignore}

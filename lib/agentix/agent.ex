@@ -158,7 +158,11 @@ defmodule Agentix.Agent do
 
     case resolve_config(conversation_id, opts) do
       {:ok, config} ->
-        Persistence.put_conversation(conversation_id, %{settings: Map.from_struct(config)})
+        Persistence.put_conversation(conversation_id, %{
+          settings: Map.from_struct(config),
+          tenant_key: config.tenant_key
+        })
+
         {summary, events} = Persistence.load_since(conversation_id)
         last_seq = max_seq(summary, events)
 
@@ -175,6 +179,9 @@ defmodule Agentix.Agent do
 
       :error ->
         {:stop, :unknown_conversation}
+
+      {:error, :tenant_key_conflict} ->
+        {:stop, :tenant_key_conflict}
     end
   end
 
@@ -452,7 +459,11 @@ defmodule Agentix.Agent do
     # Telemetry carries only scalar identity — never the raw Scope (its current_user /
     # assigns routinely hold host PII and tool-auth credentials, and telemetry fans out
     # to every attached handler).
-    telemetry_meta = %{conversation_id: data.conversation_id, system_call?: turn.scope.system?}
+    telemetry_meta = %{
+      conversation_id: data.conversation_id,
+      system_call?: turn.scope.system?,
+      tenant_key: data.config.tenant_key
+    }
 
     %{pid: pid, ref: ref} =
       Task.Supervisor.async_nolink(Agentix.TaskSupervisor, fn ->
@@ -912,7 +923,8 @@ defmodule Agentix.Agent do
       tool_call_id: id,
       name: call.name,
       executor: call.tool && call.tool.executor,
-      args: call.args
+      args: call.args,
+      tenant_key: data.config.tenant_key
     }
   end
 
@@ -1647,9 +1659,53 @@ defmodule Agentix.Agent do
   end
 
   defp resolve_config(conversation_id, opts) do
+    with {:ok, config} <- base_config(conversation_id, opts) do
+      resolve_tenant_key(conversation_id, config, Keyword.get(opts, :tenant_key))
+    end
+  end
+
+  defp base_config(conversation_id, opts) do
     case Keyword.get(opts, :config) do
       %Config{} = config -> {:ok, config}
       nil -> resolve_config_from_settings(conversation_id)
+    end
+  end
+
+  # tenant_key is write-once. The per-call opt and the Config field must agree when
+  # both are given; the winner must agree with the persisted record (setting an
+  # unkeyed conversation, or re-passing the same value, is fine). The resolved
+  # config always folds the surviving key in, so `init` re-persists it verbatim
+  # and a revived conversation keeps stamping telemetry.
+  defp resolve_tenant_key(conversation_id, config, opt_key) do
+    Config.validate_tenant_key!(opt_key)
+
+    case requested_tenant_key(opt_key, config.tenant_key) do
+      {:ok, requested} -> merge_tenant_key(config, requested, persisted_tenant_key(conversation_id))
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # The per-call opt and the Config field must agree when both are given.
+  defp requested_tenant_key(nil, config_key), do: {:ok, config_key}
+
+  defp requested_tenant_key(opt_key, config_key) when config_key in [nil, opt_key],
+    do: {:ok, opt_key}
+
+  defp requested_tenant_key(_opt_key, _config_key), do: {:error, :tenant_key_conflict}
+
+  # The surviving key must agree with the persisted record; an unkeyed side defers
+  # to the keyed one.
+  defp merge_tenant_key(config, nil, persisted), do: {:ok, %{config | tenant_key: persisted}}
+
+  defp merge_tenant_key(config, requested, persisted) when persisted in [nil, requested],
+    do: {:ok, %{config | tenant_key: requested}}
+
+  defp merge_tenant_key(_config, _requested, _persisted), do: {:error, :tenant_key_conflict}
+
+  defp persisted_tenant_key(conversation_id) do
+    case Persistence.get_conversation(conversation_id) do
+      %{tenant_key: key} -> key
+      _ -> nil
     end
   end
 
