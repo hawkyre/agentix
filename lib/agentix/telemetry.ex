@@ -15,9 +15,9 @@ end
 defmodule Agentix.Telemetry do
   @moduledoc false
   # Nil-safe helpers for the [:agentix, :model_call] and [:agentix, :tool] telemetry
-  # events, and owner of the payload shapes those events expose. Nothing here may
-  # raise — a telemetry payload must never take down a turn, so every mapper degrades
-  # to nil on an unexpected shape.
+  # events (documented in guides/telemetry.md), and owner of the payload shapes those
+  # events expose. Nothing here may raise — a telemetry payload must never take down
+  # a turn, so every mapper degrades to nil on an unexpected shape.
 
   alias ReqLLM.Message
 
