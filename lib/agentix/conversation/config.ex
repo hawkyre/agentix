@@ -143,19 +143,8 @@ defmodule Agentix.Conversation.Config do
     validate_api_key!(config.api_key)
     validate_retry!(config.retry)
     validate_response_format!(config.response_format)
-    validate_tenant_key!(config.tenant_key)
+    Agentix.TenantKey.validate!(config.tenant_key)
     config
-  end
-
-  @doc false
-  # Shared with the per-call `tenant_key:` option check in `Agentix.Agent`.
-  @spec validate_tenant_key!(term()) :: :ok
-  def validate_tenant_key!(nil), do: :ok
-  def validate_tenant_key!(key) when is_binary(key) and key != "", do: :ok
-
-  def validate_tenant_key!(other) do
-    raise ArgumentError,
-          "tenant_key must be nil or a non-empty string, got: #{inspect(other)}"
   end
 
   # Revival from the Ecto adapter hands settings back as a **string-keyed** JSON map; the

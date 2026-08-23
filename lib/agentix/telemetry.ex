@@ -55,4 +55,51 @@ defmodule Agentix.Telemetry do
   @spec finish_reason(term()) :: :tool_calls | :stop
   def finish_reason(%Message{tool_calls: [_ | _]}), do: :tool_calls
   def finish_reason(_message), do: :stop
+
+  ## [:agentix, :tool] emitters — the event's measurement/metadata shapes live here;
+  ## the agent supplies only the identity metadata and the span's elapsed time.
+
+  @doc false
+  @spec tool_start(map()) :: :ok
+  def tool_start(meta) do
+    :telemetry.execute(
+      [:agentix, :tool, :start],
+      %{system_time: System.system_time(), monotonic_time: System.monotonic_time()},
+      meta
+    )
+  end
+
+  @doc false
+  @spec tool_stop(map(), integer(), map()) :: :ok
+  def tool_stop(meta, duration, result) do
+    :telemetry.execute(
+      [:agentix, :tool, :stop],
+      %{duration: duration, latency_ms: to_ms(duration), monotonic_time: System.monotonic_time()},
+      Map.merge(meta, %{result: result, status: result_status(result)})
+    )
+  end
+
+  @doc false
+  @spec tool_exception(map(), integer(), term()) :: :ok
+  def tool_exception(meta, duration, reason) do
+    {cause, stacktrace} = crash_details(reason)
+
+    :telemetry.execute(
+      [:agentix, :tool, :exception],
+      %{duration: duration, monotonic_time: System.monotonic_time()},
+      Map.merge(meta, %{kind: :exit, reason: cause, stacktrace: stacktrace})
+    )
+  end
+
+  @doc false
+  @spec to_ms(integer()) :: integer()
+  def to_ms(duration), do: System.convert_time_unit(duration, :native, :millisecond)
+
+  # An abnormal task exit is either `{exception_or_reason, stacktrace}` or a bare term.
+  defp crash_details({reason, stacktrace}) when is_list(stacktrace), do: {reason, stacktrace}
+  defp crash_details(reason), do: {reason, []}
+
+  defp result_status(%{ok: true}), do: :ok
+  defp result_status(%{"ok" => true}), do: :ok
+  defp result_status(_result), do: :error
 end

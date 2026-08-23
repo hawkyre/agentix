@@ -82,9 +82,9 @@ Shared metadata: `conversation_id`, `turn_ref`, `tool_call_id`, `name`, `executo
 
 | event | measurements | metadata adds |
 | ----- | ------------ | ------------- |
-| `[:agentix, :tool, :start]` | `system_time` | — |
-| `[:agentix, :tool, :stop]` | `duration` (native), `latency_ms` | `result` (`%{ok: …}` convention), `status` (`:ok` \| `:error`) |
-| `[:agentix, :tool, :exception]` | `duration` | `kind` (`:exit`), `reason`, `stacktrace` |
+| `[:agentix, :tool, :start]` | `system_time`, `monotonic_time` | — |
+| `[:agentix, :tool, :stop]` | `duration` (native), `latency_ms`, `monotonic_time` | `result` (`%{ok: …}` convention), `status` (`:ok` \| `:error`) |
+| `[:agentix, :tool, :exception]` | `duration`, `monotonic_time` | `kind` (`:exit`), `reason`, `stacktrace` |
 
 Every terminal closes the span: a denial, a timeout, a turn cancel, unparseable
 arguments, and an unknown tool all emit `:stop` with `status: :error`;
@@ -117,12 +117,18 @@ conversation-to-user mapping (Agentix does not broadcast the caller's scope).
 
       def handle_event([:agentix, :model_call, :stop], measurements, metadata, _config) do
         # Extract in-process (cheap), deliver off-process (the HTTP call).
+        # PostHog wants the provider and bare model id separately; Agentix's model
+        # is a "provider:model-id" spec string. And $ai_trace_id allows only
+        # letters/numbers and - _ ~ . @ ( ) ! ' : | — phash2 keeps the turn ref legal.
+        [provider, model] = String.split(metadata.model, ":", parts: 2)
+
         event = %{
           event: "$ai_generation",
           distinct_id: MyApp.Accounts.user_for_conversation(metadata.conversation_id),
           properties: %{
-            "$ai_trace_id": "#{metadata.conversation_id}:#{inspect(metadata.turn_ref)}",
-            "$ai_model": metadata.model,
+            "$ai_trace_id": "#{metadata.conversation_id}:#{:erlang.phash2(metadata.turn_ref)}",
+            "$ai_provider": provider,
+            "$ai_model": model,
             "$ai_input_tokens": measurements.input_tokens,
             "$ai_output_tokens": measurements.output_tokens,
             "$ai_latency": measurements.latency_ms / 1000,
@@ -143,7 +149,7 @@ conversation-to-user mapping (Agentix does not broadcast the caller's scope).
           event: "$ai_span",
           distinct_id: MyApp.Accounts.user_for_conversation(metadata.conversation_id),
           properties: %{
-            "$ai_trace_id": "#{metadata.conversation_id}:#{inspect(metadata.turn_ref)}",
+            "$ai_trace_id": "#{metadata.conversation_id}:#{:erlang.phash2(metadata.turn_ref)}",
             "$ai_span_name": metadata.name,
             "$ai_latency": measurements.latency_ms / 1000,
             status: metadata.status,

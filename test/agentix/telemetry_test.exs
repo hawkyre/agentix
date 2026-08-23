@@ -171,7 +171,8 @@ defmodule Agentix.TelemetryTest do
       :ok = Conversation.send_message(id, "Hi", Scope.new())
       assert_receive {:turn_completed, _turn_ref}
 
-      assert_receive {[:agentix, :tool, :start], ^ref, %{system_time: _}, metadata}
+      assert_receive {[:agentix, :tool, :start], ^ref, %{system_time: _, monotonic_time: _},
+                      metadata}
 
       assert %{conversation_id: ^id, name: "echo", executor: :server, args: %{"q" => "x"}} =
                metadata
@@ -184,6 +185,7 @@ defmodule Agentix.TelemetryTest do
 
       assert is_integer(measurements.duration)
       assert is_integer(measurements.latency_ms) and measurements.latency_ms >= 0
+      assert is_integer(measurements.monotonic_time)
     end
 
     test "a :human tool's span covers the suspension", %{id: id, ref: ref} do
@@ -223,7 +225,7 @@ defmodule Agentix.TelemetryTest do
       assert_receive {[:agentix, :tool, :start], ^ref, _measurements,
                       %{name: "dying", tool_call_id: tool_call_id}}
 
-      assert_receive {[:agentix, :tool, :exception], ^ref, %{duration: _},
+      assert_receive {[:agentix, :tool, :exception], ^ref, %{duration: _, monotonic_time: _},
                       %{tool_call_id: ^tool_call_id, kind: :exit, reason: :boom, stacktrace: []}}
 
       refute_receive {[:agentix, :tool, :stop], ^ref, %{}, %{tool_call_id: ^tool_call_id}}, 30

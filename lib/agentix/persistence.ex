@@ -70,7 +70,12 @@ defmodule Agentix.Persistence do
   @doc "Returns the conversation record (`%{id, settings, status, fsm_state}`) or `nil`."
   @callback get_conversation(conversation_id()) :: conversation() | nil
 
-  @doc "Upserts the conversation record, merging `attrs` (`:settings`, `:status`, `:fsm_state`)."
+  @doc """
+  Upserts the conversation record, merging `attrs` (`:settings`, `:status`,
+  `:fsm_state`, `:tenant_key`). This is a raw adapter write: the tenant-key
+  write-once rule is enforced at the `Agentix.Conversation` API layer, not here —
+  a direct caller passing `:tenant_key` owns that invariant itself.
+  """
   @callback put_conversation(conversation_id(), map()) :: :ok
 
   @doc """
@@ -184,7 +189,8 @@ defmodule Agentix.Persistence do
   def delete_conversation(conversation_id), do: adapter().delete_conversation(conversation_id)
 
   @spec delete_by_tenant(String.t()) :: {:ok, non_neg_integer()}
-  def delete_by_tenant(tenant_key), do: adapter().delete_by_tenant(tenant_key)
+  def delete_by_tenant(tenant_key) when is_binary(tenant_key) and tenant_key != "",
+    do: adapter().delete_by_tenant(tenant_key)
 
   @spec put_fsm_state(conversation_id(), map()) :: :ok
   def put_fsm_state(conversation_id, fsm_state),

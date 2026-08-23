@@ -22,7 +22,7 @@ defmodule Agentix.Scope do
       never persisted and never broadcast on telemetry.
   """
 
-  alias Agentix.Conversation.Config
+  alias Agentix.TenantKey
 
   @type t :: %__MODULE__{
           current_user: term() | nil,
@@ -42,7 +42,7 @@ defmodule Agentix.Scope do
     scope = struct!(__MODULE__, attrs)
     validate_assigns!(scope.assigns)
     validate_system!(scope)
-    Config.validate_tenant_key!(scope.tenant_key)
+    TenantKey.validate!(scope.tenant_key)
     scope
   end
 

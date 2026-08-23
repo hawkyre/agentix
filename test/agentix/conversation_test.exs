@@ -63,6 +63,30 @@ defmodule Agentix.ConversationTest do
 
   defp config(opts \\ []), do: Config.new(Keyword.merge([model: "mock:test"], opts))
 
+  describe "tenant_key write-once under races" do
+    test "concurrent ensure_started with conflicting keys never both succeed" do
+      # Fresh id per round so both callers race the cold-start path; whoever loses
+      # the DynamicSupervisor start race must be re-checked, not blindly accepted.
+      for _round <- 1..25 do
+        id = "conv-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+
+        results =
+          ["victim", "attacker"]
+          |> Enum.map(fn key ->
+            Task.async(fn ->
+              Conversation.ensure_started(id, config: config(), tenant_key: key)
+            end)
+          end)
+          |> Task.await_many()
+
+        assert Enum.count(results, &match?({:ok, _pid}, &1)) == 1
+        assert Enum.count(results, &match?({:error, :tenant_key_conflict}, &1)) == 1
+        assert Persistence.get_conversation(id).tenant_key in ["victim", "attacker"]
+        Conversation.stop(id)
+      end
+    end
+  end
+
   defp wait_for_unregister(id, attempts \\ 200)
   defp wait_for_unregister(_id, 0), do: false
 

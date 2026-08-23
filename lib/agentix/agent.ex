@@ -16,6 +16,7 @@ defmodule Agentix.Agent do
   alias Agentix.Provider
   alias Agentix.Scope
   alias Agentix.Telemetry
+  alias Agentix.TenantKey
   alias Agentix.Tool
   alias Agentix.Tool.Dispatch
   alias Agentix.Turn
@@ -812,7 +813,9 @@ defmodule Agentix.Agent do
     broadcast_result(data.publisher, id, result)
     # `telemetry: false` when the caller already closed the span (`tool_task_down`
     # emits :exception instead) — a span gets exactly one terminal event.
-    if Keyword.get(opts, :telemetry, true), do: emit_tool_stop(data, id, call, result)
+    if Keyword.get(opts, :telemetry, true),
+      do: Telemetry.tool_stop(tool_meta(data, id, call), elapsed(call), result)
+
     update_call(%{data | last_seq: seq}, id, %{call | phase: :done, result: result, timer: nil})
   end
 
@@ -837,7 +840,8 @@ defmodule Agentix.Agent do
         :keep_state_and_data
 
       id ->
-        emit_tool_exception(data, id, current_call(data, id), reason)
+        call = current_call(data, id)
+        Telemetry.tool_exception(tool_meta(data, id, call), elapsed(call), reason)
 
         data
         |> do_record_result(id, %{ok: false, error: "tool crashed: #{inspect(reason)}"},
@@ -910,9 +914,11 @@ defmodule Agentix.Agent do
     }
   end
 
-  # Registers a fresh call entry and opens its [:agentix, :tool] span.
+  # Registers a fresh call entry and opens its [:agentix, :tool] span. The payload
+  # shapes are owned by `Agentix.Telemetry`; this module supplies only the identity
+  # metadata (from FSM state) and the span's elapsed time.
   defp begin_call(data, id, entry) do
-    emit_tool_start(data, id, entry)
+    Telemetry.tool_start(tool_meta(data, id, entry))
     update_call(data, id, entry)
   end
 
@@ -928,44 +934,7 @@ defmodule Agentix.Agent do
     }
   end
 
-  defp emit_tool_start(data, id, entry) do
-    :telemetry.execute(
-      [:agentix, :tool, :start],
-      %{system_time: System.system_time()},
-      tool_meta(data, id, entry)
-    )
-  end
-
-  defp emit_tool_stop(data, id, call, result) do
-    duration = System.monotonic_time() - call.started
-
-    :telemetry.execute(
-      [:agentix, :tool, :stop],
-      %{duration: duration, latency_ms: to_ms(duration)},
-      data
-      |> tool_meta(id, call)
-      |> Map.merge(%{result: result, status: tool_result_status(result)})
-    )
-  end
-
-  defp emit_tool_exception(data, id, call, reason) do
-    {cause, stacktrace} = crash_details(reason)
-    duration = System.monotonic_time() - call.started
-
-    :telemetry.execute(
-      [:agentix, :tool, :exception],
-      %{duration: duration},
-      data
-      |> tool_meta(id, call)
-      |> Map.merge(%{kind: :exit, reason: cause, stacktrace: stacktrace})
-    )
-  end
-
-  # An abnormal task exit is either `{exception_or_reason, stacktrace}` or a bare term.
-  defp crash_details({reason, stacktrace}) when is_list(stacktrace), do: {reason, stacktrace}
-  defp crash_details(reason), do: {reason, []}
-
-  defp to_ms(duration), do: System.convert_time_unit(duration, :native, :millisecond)
+  defp elapsed(call), do: System.monotonic_time() - call.started
 
   defp update_call(data, id, entry) do
     %{data | turn: %{data.turn | calls: Map.put(data.turn.calls, id, entry)}}
@@ -1201,7 +1170,7 @@ defmodule Agentix.Agent do
     end
   end
 
-  defp since_ms(started), do: to_ms(System.monotonic_time() - started)
+  defp since_ms(started), do: Telemetry.to_ms(System.monotonic_time() - started)
 
   # Resolve the config `retry` value into `{policy_map, max_attempts}`. `false` disables
   # retry: max_attempts is 1, so the policy map is inert (never reaches `delay/3`), but it
@@ -1546,7 +1515,7 @@ defmodule Agentix.Agent do
     data = %{data | turn: %{data.turn | calls: calls}}
     # Re-open each restored call's [:agentix, :tool] span (the pre-kill process's
     # span is unrecoverable); latency measures from revival.
-    Enum.each(calls, fn {id, entry} -> emit_tool_start(data, id, entry) end)
+    Enum.each(calls, fn {id, entry} -> Telemetry.tool_start(tool_meta(data, id, entry)) end)
     {:awaiting_input, data, []}
   end
 
@@ -1671,36 +1640,21 @@ defmodule Agentix.Agent do
     end
   end
 
-  # tenant_key is write-once. The per-call opt and the Config field must agree when
-  # both are given; the winner must agree with the persisted record (setting an
-  # unkeyed conversation, or re-passing the same value, is fine). The resolved
-  # config always folds the surviving key in, so `init` re-persists it verbatim
-  # and a revived conversation keeps stamping telemetry.
+  # tenant_key is write-once (`Agentix.TenantKey.merge/2` is the rule): the per-call
+  # opt and the Config field must agree when both are given, and the winner must
+  # agree with the persisted record. The resolved config always folds the surviving
+  # key in, so `init` re-persists it verbatim and a revived conversation keeps
+  # stamping telemetry.
   defp resolve_tenant_key(conversation_id, config, opt_key) do
-    Config.validate_tenant_key!(opt_key)
+    TenantKey.validate!(opt_key)
 
-    case requested_tenant_key(opt_key, config.tenant_key) do
-      {:ok, requested} -> merge_tenant_key(config, requested, persisted_tenant_key(conversation_id))
-      {:error, _reason} = error -> error
+    with {:ok, requested} <- TenantKey.merge(opt_key, config.tenant_key),
+         {:ok, key} <- TenantKey.merge(requested, persisted_tenant_key(conversation_id)) do
+      {:ok, %{config | tenant_key: key}}
+    else
+      :error -> {:error, :tenant_key_conflict}
     end
   end
-
-  # The per-call opt and the Config field must agree when both are given.
-  defp requested_tenant_key(nil, config_key), do: {:ok, config_key}
-
-  defp requested_tenant_key(opt_key, config_key) when config_key in [nil, opt_key],
-    do: {:ok, opt_key}
-
-  defp requested_tenant_key(_opt_key, _config_key), do: {:error, :tenant_key_conflict}
-
-  # The surviving key must agree with the persisted record; an unkeyed side defers
-  # to the keyed one.
-  defp merge_tenant_key(config, nil, persisted), do: {:ok, %{config | tenant_key: persisted}}
-
-  defp merge_tenant_key(config, requested, persisted) when persisted in [nil, requested],
-    do: {:ok, %{config | tenant_key: requested}}
-
-  defp merge_tenant_key(_config, _requested, _persisted), do: {:error, :tenant_key_conflict}
 
   defp persisted_tenant_key(conversation_id) do
     case Persistence.get_conversation(conversation_id) do

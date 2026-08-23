@@ -12,9 +12,9 @@ defmodule Agentix.Conversation do
   """
 
   alias Agentix.Agent
-  alias Agentix.Conversation.Config
   alias Agentix.Persistence
   alias Agentix.Scope
+  alias Agentix.TenantKey
 
   @typedoc "A user message — plain text or a prebuilt `ReqLLM.Message`."
   @type message :: String.t() | ReqLLM.Message.t()
@@ -36,7 +36,7 @@ defmodule Agentix.Conversation do
   @spec ensure_started(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def ensure_started(conversation_id, opts \\ []) when is_binary(conversation_id) do
     tenant_opt = Keyword.get(opts, :tenant_key)
-    Config.validate_tenant_key!(tenant_opt)
+    TenantKey.validate!(tenant_opt)
 
     case lookup_agent(conversation_id) do
       {:ok, pid} -> check_running_tenant(conversation_id, tenant_opt, pid)
@@ -45,8 +45,9 @@ defmodule Agentix.Conversation do
   end
 
   # The agent is already running, so a tenant_key opt can no longer change anything —
-  # it must match the persisted key exactly (write-once; and a running agent's
-  # in-memory config cannot be re-keyed, so keying an unkeyed one is refused too).
+  # it must match the persisted key exactly. Deliberately stricter than
+  # `Agentix.TenantKey.merge/2`: a running agent's in-memory config cannot be
+  # re-keyed, so late-keying a running unkeyed conversation is refused too.
   defp check_running_tenant(_conversation_id, nil, pid), do: {:ok, pid}
 
   defp check_running_tenant(conversation_id, key, pid) do
@@ -154,7 +155,10 @@ defmodule Agentix.Conversation do
         {:ok, pid}
 
       {:error, {:already_started, pid}} ->
-        {:ok, pid}
+        # Lost a start race: the winner's init has already resolved (and persisted)
+        # the tenant key, so this caller's opt must be re-checked — returning
+        # {:ok, pid} blindly would silently discard a conflicting key.
+        check_running_tenant(conversation_id, Keyword.get(opts, :tenant_key), pid)
 
       {:error, reason} when reason in [:unknown_conversation, {:shutdown, :unknown_conversation}] ->
         {:error, :unknown_conversation}
