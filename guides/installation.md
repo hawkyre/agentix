@@ -111,6 +111,11 @@ mix agentix.gen.migration         # writes priv/repo/migrations/*_create_agentix
 mix ecto.migrate
 ```
 
+The template creates the tables once, at install time — it is not re-run on upgrades. If
+you ran it on a version before `tenant_key` existed (0.3.x and earlier), add the column
+with your own migration (the exact snippet is in the CHANGELOG's Breaking section for the
+release that introduced it).
+
 Durable expiry is scheduled as Oban jobs. The audit log of model calls is off by default;
 enable it with `config :agentix, audit: true`. See `examples/agentix_demo` for the full
 wiring, including a Postgres-backed `Phoenix.LiveViewTest` that drives a HITL elicitation

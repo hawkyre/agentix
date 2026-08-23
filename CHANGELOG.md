@@ -7,7 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-model-call and per-tool-call telemetry.** Every provider attempt emits a
+  `[:agentix, :model_call, :start | :stop | :exception]` span (token usage,
+  latency, the rendered context, and the assembled response; one span per retry
+  attempt), and every tool call emits `[:agentix, :tool, :start | :stop |
+  :exception]` (latency measured across `:human`/`:client` suspensions). Events
+  fire regardless of `audit?`, so hosts can feed PostHog LLM analytics, Langfuse,
+  or OpenTelemetry without enabling audit rows. Documented in the new
+  `guides/telemetry.md`, including a worked PostHog handler. The caller's
+  `Agentix.Scope` is deliberately never broadcast — metadata carries only a
+  derived `system_call?` boolean.
+- **`tenant_key`** — optional owning tenant for multi-tenant hosts, on
+  `Agentix.Conversation.Config` and as a `tenant_key:` option on
+  `ensure_started/2` / `send_message/4`. Stored as an indexed column on
+  `agentix_conversations` (and in settings, so revival keeps it) and stamped on
+  all `:model_call`/`:tool` telemetry metadata. **Write-once**: a conflicting
+  re-key returns `{:error, :tenant_key_conflict}` — including when racing
+  concurrent starts. `Agentix.Scope` gains a documented optional `tenant_key`
+  field (per-call context; never persisted, never on telemetry).
+- `Agentix.Persistence.delete_by_tenant/1` — deletes every conversation whose
+  `tenant_key` matches, cascading to events, summaries, tool calls, and audit
+  rows; returns `{:ok, count}`.
+
 ### Breaking
+
+- New required `Agentix.Persistence` behaviour callback `delete_by_tenant/1`
+  (implemented by both bundled adapters). Third-party adapters must implement it.
+- Ecto-backed installs that already ran the migration must add the new
+  `tenant_key` column and index (the template only serves new installs; derived
+  from its `add`/`index` lines):
+
+  ```elixir
+  alter table(:agentix_conversations) do
+    add(:tenant_key, :text)
+  end
+
+  create(index(:agentix_conversations, [:tenant_key]))
+  ```
 
 - Removed the reserved `persistence` field from `Agentix.Conversation.Config`
   (documented as unused in 0.3.0; it was never consulted). `Config.new/1` now
