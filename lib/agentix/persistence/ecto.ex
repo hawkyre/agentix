@@ -133,7 +133,8 @@ if Code.ensure_loaded?(Ecto) do
             id: row.id,
             settings: row.settings,
             status: row.status,
-            fsm_state: decode_fsm_state(row.fsm_state)
+            fsm_state: decode_fsm_state(row.fsm_state),
+            tenant_key: row.tenant_key
           }
       end
     end
@@ -147,7 +148,8 @@ if Code.ensure_loaded?(Ecto) do
       |> Ecto.Changeset.change(%{
         settings: sanitize_settings(Map.get(attrs, :settings, base.settings || %{})),
         fsm_state: Map.get(attrs, :fsm_state, base.fsm_state || %{}),
-        status: Map.get(attrs, :status, base.status || :active)
+        status: Map.get(attrs, :status, base.status || :active),
+        tenant_key: Map.get(attrs, :tenant_key, base.tenant_key)
       })
       |> repo().insert_or_update!()
 
@@ -353,6 +355,13 @@ if Code.ensure_loaded?(Ecto) do
       # hang off agentix_conversations with on_delete: :delete_all.
       repo().delete_all(from(c in Conversation, where: c.id == ^conversation_id))
       :ok
+    end
+
+    @impl true
+    def delete_by_tenant(tenant_key) when is_binary(tenant_key) do
+      # Index-served; the FKs cascade to events, summaries, tool calls, model calls.
+      {count, _} = repo().delete_all(from(c in Conversation, where: c.tenant_key == ^tenant_key))
+      {:ok, count}
     end
 
     @impl true

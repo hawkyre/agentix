@@ -40,6 +40,12 @@ defmodule Agentix.Conversation.Config do
       per-request option; **never persisted** — the Ecto adapter's settings sanitizer
       drops it, so a conversation revived from persisted settings alone is key-less
       and the host must re-pass a fresh config if it relies on per-conversation keys.
+    * `tenant_key` — optional owning-tenant key for multi-tenant hosts (`nil` or a
+      non-empty string). Persisted as an indexed column on the conversation record
+      (plus in settings), stamped on `:model_call`/`:tool` telemetry metadata, and
+      the selector for `Agentix.Persistence.delete_by_tenant/1`. **Write-once**: it
+      may be set while unset and re-passed with the same value, but a conflicting
+      value makes `ensure_started/2` return `{:error, :tenant_key_conflict}`.
     * `notifier` / `pubsub` — wiring resolved at runtime; `nil` falls back to
       the application-level configuration.
 
@@ -66,6 +72,7 @@ defmodule Agentix.Conversation.Config do
           retry:
             %{max_attempts: pos_integer(), base_ms: pos_integer(), max_ms: pos_integer()} | false,
           response_format: keyword() | map() | nil,
+          tenant_key: String.t() | nil,
           notifier: module() | nil,
           pubsub: atom() | nil
         }
@@ -102,6 +109,7 @@ defmodule Agentix.Conversation.Config do
     audit?: false,
     retry: @default_retry,
     response_format: nil,
+    tenant_key: nil,
     notifier: nil,
     pubsub: nil
   ]
@@ -116,7 +124,7 @@ defmodule Agentix.Conversation.Config do
   """
   @config_fields ~w(model system_prompt tools hooks stream_transformer api_key working_budget
                     injection_reserve tool_retention compaction_window default_timeout
-                    hook_timeout audit? retry response_format notifier pubsub)a
+                    hook_timeout audit? retry response_format tenant_key notifier pubsub)a
   @field_strings Map.new(@config_fields, &{Atom.to_string(&1), &1})
 
   @spec new(keyword() | map()) :: t()
@@ -135,6 +143,7 @@ defmodule Agentix.Conversation.Config do
     validate_api_key!(config.api_key)
     validate_retry!(config.retry)
     validate_response_format!(config.response_format)
+    Agentix.TenantKey.validate!(config.tenant_key)
     config
   end
 

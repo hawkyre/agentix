@@ -9,7 +9,9 @@ defmodule Agentix.Resolve do
   @doc "Resolves `tool_call_id` in `conversation_id` with `result` under `scope`."
   @spec resolve(String.t(), String.t(), term(), Scope.t()) :: :ok | {:error, term()}
   def resolve(conversation_id, tool_call_id, result, %Scope{} = scope) do
-    with {:ok, _pid} <- Conversation.ensure_started(conversation_id) do
+    opts = Conversation.default_tenant_from_scope([], scope)
+
+    with {:ok, _pid} <- Conversation.ensure_started(conversation_id, opts) do
       :gen_statem.call(Agent.via(conversation_id), {:resolve, tool_call_id, result, scope})
     end
   end

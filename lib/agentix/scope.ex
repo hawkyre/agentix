@@ -12,15 +12,28 @@ defmodule Agentix.Scope do
       may not carry a `current_user`.
 
   Built with `new/1` (rejects unknown keys).
+
+  ## Optional fields
+
+    * `tenant_key` — the acting tenant, for multi-tenant hosts (`nil` or a
+      non-empty string). Entry verbs (`send_message/4`, `resolve/4`) use it as the
+      default `tenant_key:` option when the caller passes none, so authenticating
+      the tenant into the scope is enough to get the write-once isolation check on
+      every call (an explicit option still wins). The conversation's own persisted
+      tenant is `Agentix.Conversation.Config.tenant_key`. Like the rest of the
+      scope, this field itself is never persisted and never broadcast on telemetry.
   """
+
+  alias Agentix.TenantKey
 
   @type t :: %__MODULE__{
           current_user: term() | nil,
           assigns: map(),
-          system?: boolean()
+          system?: boolean(),
+          tenant_key: String.t() | nil
         }
 
-  defstruct current_user: nil, assigns: %{}, system?: false
+  defstruct current_user: nil, assigns: %{}, system?: false, tenant_key: nil
 
   @doc """
   Builds a scope from `attrs`. Raises `ArgumentError` on unknown keys, if `assigns`
@@ -31,6 +44,7 @@ defmodule Agentix.Scope do
     scope = struct!(__MODULE__, attrs)
     validate_assigns!(scope.assigns)
     validate_system!(scope)
+    TenantKey.validate!(scope.tenant_key)
     scope
   end
 

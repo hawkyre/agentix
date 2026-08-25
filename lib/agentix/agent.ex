@@ -15,6 +15,8 @@ defmodule Agentix.Agent do
   alias Agentix.Persistence
   alias Agentix.Provider
   alias Agentix.Scope
+  alias Agentix.Telemetry
+  alias Agentix.TenantKey
   alias Agentix.Tool
   alias Agentix.Tool.Dispatch
   alias Agentix.Turn
@@ -157,7 +159,11 @@ defmodule Agentix.Agent do
 
     case resolve_config(conversation_id, opts) do
       {:ok, config} ->
-        Persistence.put_conversation(conversation_id, %{settings: Map.from_struct(config)})
+        Persistence.put_conversation(conversation_id, %{
+          settings: Map.from_struct(config),
+          tenant_key: config.tenant_key
+        })
+
         {summary, events} = Persistence.load_since(conversation_id)
         last_seq = max_seq(summary, events)
 
@@ -174,6 +180,9 @@ defmodule Agentix.Agent do
 
       :error ->
         {:stop, :unknown_conversation}
+
+      {:error, :tenant_key_conflict} ->
+        {:stop, :tenant_key_conflict}
     end
   end
 
@@ -351,6 +360,14 @@ defmodule Agentix.Agent do
     {:keep_state_and_data, [{:reply, from, live_turn_view(state, data)}]}
   end
 
+  # The conversation's tenant key, served from any state. `Conversation`'s
+  # running-agent check calls this instead of racing a durable read — the Registry
+  # name registers before `init/1` runs, so a persisted-record read could observe
+  # the pre-init nil; a call queues behind init and always sees the resolved key.
+  defp handle_common(_state, {:call, from}, :tenant_key, data) do
+    {:keep_state_and_data, [{:reply, from, data.config.tenant_key}]}
+  end
+
   # A `:server` tool reported progress via `Agentix.Turn.report_progress/2`; rebroadcast it on
   # the live plane while its turn is current. Served from any state (a tool can report while
   # the agent is executing other tools or awaiting input); stale signals fall through below.
@@ -448,12 +465,19 @@ defmodule Agentix.Agent do
     schema = turn.schema
     transformer = data.config.stream_transformer
     retry = data.config.retry
-    conversation_id = data.conversation_id
+    # Telemetry carries only scalar identity — never the raw Scope (its current_user /
+    # assigns routinely hold host PII and tool-auth credentials, and telemetry fans out
+    # to every attached handler).
+    telemetry_meta = %{
+      conversation_id: data.conversation_id,
+      system_call?: turn.scope.system?,
+      tenant_key: data.config.tenant_key
+    }
 
     %{pid: pid, ref: ref} =
       Task.Supervisor.async_nolink(Agentix.TaskSupervisor, fn ->
         opts = stream_opts(config, schema)
-        run_stream(agent, turn.ref, model, context, opts, transformer, retry, conversation_id)
+        run_stream(agent, turn.ref, model, context, opts, transformer, retry, telemetry_meta)
       end)
 
     :telemetry.execute(
@@ -653,7 +677,7 @@ defmodule Agentix.Agent do
           append_event(data, :tool_call, %{"tool_call_id" => id, "name" => name, "args" => %{}})
 
         %{data | last_seq: seq}
-        |> update_call(id, call_entry(nil, name, %{}, :done))
+        |> begin_call(id, call_entry(nil, name, %{}, :done))
         |> do_record_result(id, %{ok: false, error: "invalid tool arguments"})
     end
   end
@@ -662,7 +686,7 @@ defmodule Agentix.Agent do
   # pair stays intact (providers reject orphan tool_calls).
   defp start_call(data, id, name, nil, args) do
     data
-    |> update_call(id, call_entry(nil, name, args, :done))
+    |> begin_call(id, call_entry(nil, name, args, :done))
     |> do_record_result(id, %{ok: false, error: "unknown tool: #{name}"})
   end
 
@@ -670,7 +694,7 @@ defmodule Agentix.Agent do
   # dispatches it locally (a full provider-tool round-trip is not yet implemented).
   defp start_call(data, id, name, %Tool{executor: :provider} = tool, args) do
     data
-    |> update_call(id, call_entry(tool, name, args, :done))
+    |> begin_call(id, call_entry(tool, name, args, :done))
     |> do_record_result(id, %{ok: true, result: nil})
   end
 
@@ -684,7 +708,7 @@ defmodule Agentix.Agent do
 
     data
     |> track_task(task.ref, id)
-    |> update_call(id, call_entry(tool, name, args, :running, task: task))
+    |> begin_call(id, call_entry(tool, name, args, :running, task: task))
   end
 
   # Everything else suspends and awaits an external resolution: gated `:server` /
@@ -713,7 +737,7 @@ defmodule Agentix.Agent do
     # `revive_awaiting/2`). Both are cancelled on any terminal outcome.
     timer = arm_timeout(data, id)
     Persistence.schedule_expiry(data.conversation_id, id, data.config.default_timeout)
-    update_call(data, id, call_entry(tool, name, args, phase, timer: timer))
+    begin_call(data, id, call_entry(tool, name, args, phase, timer: timer))
   end
 
   # Resolution arrived for a pending call. Reply `:ok` immediately, then advance.
@@ -777,7 +801,7 @@ defmodule Agentix.Agent do
 
   # Records a terminal result for a call: writes the paired `:tool_result` event,
   # clears any durable pending record, broadcasts, and marks the call done.
-  defp do_record_result(data, id, result) do
+  defp do_record_result(data, id, result, opts \\ []) do
     call = current_call(data, id)
     cancel_timer(call.timer)
     # A `timer` means this call was suspended, so it also has a durable expiry to cancel.
@@ -795,6 +819,11 @@ defmodule Agentix.Agent do
 
     Persistence.resolve_tool_call(id, result_status(result), result)
     broadcast_result(data.publisher, id, result)
+    # `telemetry: false` when the caller already closed the span (`tool_task_down`
+    # emits :exception instead) — a span gets exactly one terminal event.
+    if Keyword.get(opts, :telemetry, true),
+      do: Telemetry.tool_stop(tool_meta(data, id, call), elapsed(call), result)
+
     update_call(%{data | last_seq: seq}, id, %{call | phase: :done, result: result, timer: nil})
   end
 
@@ -819,8 +848,13 @@ defmodule Agentix.Agent do
         :keep_state_and_data
 
       id ->
+        call = current_call(data, id)
+        Telemetry.tool_exception(tool_meta(data, id, call), elapsed(call), reason)
+
         data
-        |> do_record_result(id, %{ok: false, error: "tool crashed: #{inspect(reason)}"})
+        |> do_record_result(id, %{ok: false, error: "tool crashed: #{inspect(reason)}"},
+          telemetry: false
+        )
         |> advance(from_state)
     end
   end
@@ -879,9 +913,36 @@ defmodule Agentix.Agent do
       phase: phase,
       task: Keyword.get(opts, :task),
       result: nil,
-      timer: Keyword.get(opts, :timer)
+      timer: Keyword.get(opts, :timer),
+      # [:agentix, :tool] span origin — one span per tool_call_id, from entry
+      # creation (dispatch or suspension) to its terminal in `do_record_result` /
+      # `tool_task_down`. A revived entry re-stamps here, so post-revival latency
+      # measures from revival (the pre-crash wait is not recoverable).
+      started: System.monotonic_time()
     }
   end
+
+  # Registers a fresh call entry and opens its [:agentix, :tool] span. The payload
+  # shapes are owned by `Agentix.Telemetry`; this module supplies only the identity
+  # metadata (from FSM state) and the span's elapsed time.
+  defp begin_call(data, id, entry) do
+    Telemetry.tool_start(tool_meta(data, id, entry))
+    update_call(data, id, entry)
+  end
+
+  defp tool_meta(data, id, call) do
+    %{
+      conversation_id: data.conversation_id,
+      turn_ref: data.turn.ref,
+      tool_call_id: id,
+      name: call.name,
+      executor: call.tool && call.tool.executor,
+      args: call.args,
+      tenant_key: data.config.tenant_key
+    }
+  end
+
+  defp elapsed(call), do: System.monotonic_time() - call.started
 
   defp update_call(data, id, entry) do
     %{data | turn: %{data.turn | calls: Map.put(data.turn.calls, id, entry)}}
@@ -1028,72 +1089,96 @@ defmodule Agentix.Agent do
 
   ## Streaming task (runs under Agentix.TaskSupervisor)
 
-  defp run_stream(agent, turn_ref, model, context, opts, transformer, retry, conversation_id) do
+  defp run_stream(agent, turn_ref, model, context, opts, transformer, retry, telemetry_meta) do
     {policy, max_attempts} = retry_plan(retry)
 
-    case attempt_stream(model, context, opts, policy, turn_ref, conversation_id, 1, max_attempts) do
-      {:ok, stream} ->
-        send(agent, {:stream_started, turn_ref, stream.cancel})
+    env = %{
+      agent: agent,
+      turn_ref: turn_ref,
+      model: model,
+      context: context,
+      opts: opts,
+      transformer: transformer,
+      policy: policy,
+      max_attempts: max_attempts,
+      meta: Map.merge(telemetry_meta, %{turn_ref: turn_ref, model: model, context: context})
+    }
 
-        # The stream-transformer seam: one `(chunk -> chunk)` pass per chunk
-        # (identity when unset), applied here at the provider seam before forwarding.
-        # A failure during enumeration (after this point) crashes the task and fails the
-        # turn — it is never retried, since tokens may already have streamed to the client.
+    attempt_stream(env, 1)
+  end
+
+  # One [:agentix, :model_call] span per attempt, covering open → consume → finalize.
+  # A pre-stream {:error, reason} raises the StreamOpenError sentinel inside the span
+  # fun (the span ends in :exception) and is caught here, where the retry decision
+  # lives — so the existing [:agentix, :turn, :retry] event, the backoff sleep, and
+  # the recursion all sit outside the span. Any other raise (mid-stream enumeration,
+  # finalize) also ends the span in :exception, then propagates and crashes the task
+  # as before — never retried, since tokens may already have streamed to the client.
+  defp attempt_stream(env, attempt) do
+    span_meta = Map.put(env.meta, :attempt, attempt)
+    started = System.monotonic_time()
+
+    :telemetry.span([:agentix, :model_call], span_meta, fn ->
+      open_and_consume_stream(env, span_meta, started)
+    end)
+  rescue
+    error in Telemetry.StreamOpenError -> handle_open_failure(env, attempt, error.reason)
+  end
+
+  # The spanned work for one attempt: open the provider stream, forward the chunks
+  # (through the stream-transformer seam — one `(chunk -> chunk)` pass per chunk,
+  # identity when unset), finalize, and report back to the agent.
+  defp open_and_consume_stream(env, span_meta, started) do
+    case Provider.stream(env.model, env.context, env.opts) do
+      {:ok, stream} ->
+        send(env.agent, {:stream_started, env.turn_ref, stream.cancel})
+
         Enum.each(stream.chunks, fn chunk ->
-          send(agent, {:chunk, turn_ref, Hook.transform_chunk(chunk, transformer)})
+          send(env.agent, {:chunk, env.turn_ref, Hook.transform_chunk(chunk, env.transformer)})
         end)
 
         {message, usage} = stream.finalize.()
-        send(agent, {:stream_done, turn_ref, message, usage})
+        send(env.agent, {:stream_done, env.turn_ref, message, usage})
+
+        measurements =
+          usage
+          |> Telemetry.usage_measurements()
+          |> Map.put(:latency_ms, since_ms(started))
+
+        metadata =
+          Map.merge(span_meta, %{
+            response: message,
+            finish_reason: Telemetry.finish_reason(message),
+            usage: usage
+          })
+
+        {:ok, measurements, metadata}
 
       {:error, reason} ->
-        send(agent, {:stream_error, turn_ref, reason})
+        raise Telemetry.StreamOpenError, reason: reason
     end
   end
 
-  # Open the provider stream, retrying the *pre-stream* call on a transient error per the
-  # resolved `policy` map. `attempt` is 1-based; `max_attempts` of 1 means a single try.
-  defp attempt_stream(
-         model,
-         context,
-         opts,
-         policy,
-         turn_ref,
-         conversation_id,
-         attempt,
-         max_attempts
-       ) do
-    case Provider.stream(model, context, opts) do
-      {:ok, stream} ->
-        {:ok, stream}
+  # `attempt` is 1-based; `max_attempts` of 1 means a single try. A retried open
+  # produces a fresh :model_call span with `attempt` incremented.
+  defp handle_open_failure(env, attempt, reason) do
+    if attempt < env.max_attempts and Agentix.Retry.retryable?(reason) do
+      delay = Agentix.Retry.delay(attempt, env.policy, Agentix.Retry.retry_after_ms(reason))
 
-      {:error, reason} ->
-        if attempt < max_attempts and Agentix.Retry.retryable?(reason) do
-          delay = Agentix.Retry.delay(attempt, policy, Agentix.Retry.retry_after_ms(reason))
+      :telemetry.execute(
+        [:agentix, :turn, :retry],
+        %{attempt: attempt, delay_ms: delay},
+        %{conversation_id: env.meta.conversation_id, turn_ref: env.turn_ref, reason: reason}
+      )
 
-          :telemetry.execute(
-            [:agentix, :turn, :retry],
-            %{attempt: attempt, delay_ms: delay},
-            %{conversation_id: conversation_id, turn_ref: turn_ref, reason: reason}
-          )
-
-          Process.sleep(delay)
-
-          attempt_stream(
-            model,
-            context,
-            opts,
-            policy,
-            turn_ref,
-            conversation_id,
-            attempt + 1,
-            max_attempts
-          )
-        else
-          {:error, reason}
-        end
+      Process.sleep(delay)
+      attempt_stream(env, attempt + 1)
+    else
+      send(env.agent, {:stream_error, env.turn_ref, reason})
     end
   end
+
+  defp since_ms(started), do: Telemetry.to_ms(System.monotonic_time() - started)
 
   # Resolve the config `retry` value into `{policy_map, max_attempts}`. `false` disables
   # retry: max_attempts is 1, so the policy map is inert (never reaches `delay/3`), but it
@@ -1390,28 +1475,43 @@ defmodule Agentix.Agent do
   end
 
   defp reconcile_one({id, name}, data) do
+    record = Persistence.get_tool_call(id)
+    result = reconciled_result(record)
+
     {:ok, seq} =
       append_event(data, :tool_result, %{
         "tool_call_id" => id,
         "name" => name,
-        "result" => reconciled_result(id)
+        "result" => result
       })
+
+    # Close the [:agentix, :tool] span the pre-crash process opened for this call —
+    # every :start must get a terminal. The original start time and turn are
+    # unrecoverable across the crash, so duration is 0 and turn_ref is nil.
+    Telemetry.tool_stop(
+      %{
+        conversation_id: data.conversation_id,
+        turn_ref: nil,
+        tool_call_id: id,
+        name: name,
+        executor: record && record[:executor],
+        args: record && record[:args],
+        tenant_key: data.config.tenant_key
+      },
+      0,
+      result
+    )
 
     %{data | last_seq: seq}
   end
 
   # Prefer a durable terminal result (e.g. the durable expiry already resolved it);
   # otherwise the call was interrupted mid-run.
-  defp reconciled_result(id) do
-    case Persistence.get_tool_call(id) do
-      %{status: status, result: result}
-      when status in [:resolved, :errored, :expired] and not is_nil(result) ->
-        result
+  defp reconciled_result(%{status: status, result: result})
+       when status in [:resolved, :errored, :expired] and not is_nil(result), do: result
 
-      _ ->
-        %{ok: false, error: "tool call interrupted: agent restarted before it completed"}
-    end
-  end
+  defp reconciled_result(_record),
+    do: %{ok: false, error: "tool call interrupted: agent restarted before it completed"}
 
   # Rebuild the suspended turn: a `calls` entry per still-pending tool call, with the
   # `phase` restored so `handle_resolve/6` accepts the resolution. The pending records are
@@ -1435,7 +1535,11 @@ defmodule Agentix.Agent do
         {call.id, call_entry(find_tool(data.config, name), name, call.args, phase, timer: timer)}
       end)
 
-    {:awaiting_input, %{data | turn: %{data.turn | calls: calls}}, []}
+    data = %{data | turn: %{data.turn | calls: calls}}
+    # Re-open each restored call's [:agentix, :tool] span (the pre-kill process's
+    # span is unrecoverable); latency measures from revival.
+    Enum.each(calls, fn {id, entry} -> Telemetry.tool_start(tool_meta(data, id, entry)) end)
+    {:awaiting_input, data, []}
   end
 
   defp fsm_pending(conversation_id) do
@@ -1546,20 +1650,43 @@ defmodule Agentix.Agent do
     max(event_max, summary_to)
   end
 
+  # One persisted-record fetch serves both the settings revival and the tenant merge.
   defp resolve_config(conversation_id, opts) do
+    persisted = Persistence.get_conversation(conversation_id)
+
+    with {:ok, config} <- base_config(opts, persisted) do
+      resolve_tenant_key(config, Keyword.get(opts, :tenant_key), persisted_tenant_key(persisted))
+    end
+  end
+
+  defp base_config(opts, persisted) do
     case Keyword.get(opts, :config) do
       %Config{} = config -> {:ok, config}
-      nil -> resolve_config_from_settings(conversation_id)
+      nil -> resolve_config_from_settings(persisted)
     end
   end
 
-  defp resolve_config_from_settings(conversation_id) do
-    case Persistence.get_conversation(conversation_id) do
-      %{settings: settings} when is_map(settings) and map_size(settings) > 0 ->
-        {:ok, Config.new(settings)}
+  # tenant_key is write-once (`Agentix.TenantKey.merge/2` is the rule): the per-call
+  # opt and the Config field must agree when both are given, and the winner must
+  # agree with the persisted record. The resolved config always folds the surviving
+  # key in, so `init` re-persists it verbatim and a revived conversation keeps
+  # stamping telemetry.
+  defp resolve_tenant_key(config, opt_key, persisted_key) do
+    TenantKey.validate!(opt_key)
 
-      _ ->
-        :error
+    with {:ok, requested} <- TenantKey.merge(opt_key, config.tenant_key),
+         {:ok, key} <- TenantKey.merge(requested, persisted_key) do
+      {:ok, %{config | tenant_key: key}}
+    else
+      :error -> {:error, :tenant_key_conflict}
     end
   end
+
+  defp persisted_tenant_key(%{tenant_key: key}), do: key
+  defp persisted_tenant_key(_persisted), do: nil
+
+  defp resolve_config_from_settings(%{settings: settings})
+       when is_map(settings) and map_size(settings) > 0, do: {:ok, Config.new(settings)}
+
+  defp resolve_config_from_settings(_persisted), do: :error
 end

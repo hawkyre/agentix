@@ -1,7 +1,7 @@
 defmodule Agentix.MixProject do
   use Mix.Project
 
-  @version "0.3.0"
+  @version "0.4.0"
   @source_url "https://github.com/hawkyre/agentix"
 
   def project do
@@ -135,6 +135,7 @@ defmodule Agentix.MixProject do
         "guides/tools.md",
         "guides/persistence-and-resumability.md",
         "guides/reliability-and-structured-output.md",
+        "guides/telemetry.md",
         "guides/compaction.md",
         "guides/rendering.md",
         "guides/memory-and-sizing.md",
@@ -153,6 +154,7 @@ defmodule Agentix.MixProject do
           Agentix.Executor
         ],
         "Tools & HITL": [Agentix.Tool, Agentix.Turn],
+        Telemetry: [Agentix.Telemetry.StreamOpenError],
         Hooks: [Agentix.Hook, Agentix.Hook.OverflowError],
         "Compaction & tokens": [Agentix.Tokenizer, Agentix.Tokenizer.Heuristic],
         Persistence: [

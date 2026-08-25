@@ -5,7 +5,7 @@ if Code.ensure_loaded?(Ecto.Repo) do
     # Oban + Agentix migrations (idempotent), start Oban with fast staging, and point the
     # persistence adapter at the repo. `DATABASE_URL` defaults to the dev container.
 
-    @default_url "postgres://postgres:postgres@127.0.0.1:5433/agentix_test"
+    @default_url "postgres://postgres:postgres@127.0.0.1:5434/agentix_test"
 
     @doc """
     Call from `setup_all`. Pass `truncate: true` for the conformance suite, which reuses

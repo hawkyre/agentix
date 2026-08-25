@@ -12,7 +12,8 @@ defmodule Agentix.Persistence do
 
   ## Record shapes
 
-    * **conversation** — `%{id, settings, status, fsm_state}`.
+    * **conversation** — `%{id, settings, status, fsm_state, tenant_key}` (`tenant_key`
+      nil for untenanted conversations).
     * **fsm_state** — `%{state, pending, last_seq}` (a cache over the log).
     * **summary** — `%{from_seq, to_seq, content, version}` (+ adapter-assigned id/inserted_at).
     * **tool_call** — `%{id, conversation_id, executor, status, args, result, ...}`.
@@ -31,7 +32,8 @@ defmodule Agentix.Persistence do
           id: conversation_id(),
           settings: map(),
           status: atom(),
-          fsm_state: map()
+          fsm_state: map(),
+          tenant_key: String.t() | nil
         }
   @type summary :: map()
   @type tool_call :: map()
@@ -68,7 +70,12 @@ defmodule Agentix.Persistence do
   @doc "Returns the conversation record (`%{id, settings, status, fsm_state}`) or `nil`."
   @callback get_conversation(conversation_id()) :: conversation() | nil
 
-  @doc "Upserts the conversation record, merging `attrs` (`:settings`, `:status`, `:fsm_state`)."
+  @doc """
+  Upserts the conversation record, merging `attrs` (`:settings`, `:status`,
+  `:fsm_state`, `:tenant_key`). This is a raw adapter write: the tenant-key
+  write-once rule is enforced at the `Agentix.Conversation` API layer, not here —
+  a direct caller passing `:tenant_key` owns that invariant itself.
+  """
   @callback put_conversation(conversation_id(), map()) :: :ok
 
   @doc """
@@ -141,6 +148,16 @@ defmodule Agentix.Persistence do
   """
   @callback delete_conversation(conversation_id()) :: :ok
 
+  @doc """
+  Deletes every conversation whose `tenant_key` equals `tenant_key` — events,
+  summaries, tool calls, and audit rows included — returning the count of
+  conversations removed (`{:ok, 0}` for an unknown key). Conversations without a
+  tenant key are never matched. Stop the tenant's live agents first
+  (`Agentix.Conversation.stop/1`) — deleting under a running conversation is
+  undefined, and hosts own the conversation↔tenant mapping needed to do so.
+  """
+  @callback delete_by_tenant(String.t()) :: {:ok, non_neg_integer()}
+
   @default_adapter Agentix.Persistence.ETS
 
   @doc "The configured persistence adapter module."
@@ -170,6 +187,10 @@ defmodule Agentix.Persistence do
 
   @spec delete_conversation(conversation_id()) :: :ok
   def delete_conversation(conversation_id), do: adapter().delete_conversation(conversation_id)
+
+  @spec delete_by_tenant(String.t()) :: {:ok, non_neg_integer()}
+  def delete_by_tenant(tenant_key) when is_binary(tenant_key) and tenant_key != "",
+    do: adapter().delete_by_tenant(tenant_key)
 
   @spec put_fsm_state(conversation_id(), map()) :: :ok
   def put_fsm_state(conversation_id, fsm_state),

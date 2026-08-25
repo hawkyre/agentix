@@ -261,6 +261,57 @@ defmodule Agentix.PersistenceConformance do
           Application.delete_env(:agentix, :audit)
         end
       end
+
+      test "tenant_key round-trips through put_conversation/get_conversation" do
+        conv = uid("conv")
+        tenant = uid("tenant")
+
+        :ok = @adapter.put_conversation(conv, %{settings: %{"a" => 1}, tenant_key: tenant})
+        assert @adapter.get_conversation(conv).tenant_key == tenant
+
+        # A later write without :tenant_key leaves the stored key untouched.
+        :ok = @adapter.put_conversation(conv, %{settings: %{"a" => 2}})
+        assert @adapter.get_conversation(conv).tenant_key == tenant
+
+        # A conversation written without a tenant reads back nil.
+        untenanted = uid("conv")
+        :ok = @adapter.put_conversation(untenanted, %{settings: %{}})
+        assert @adapter.get_conversation(untenanted).tenant_key == nil
+      end
+
+      test "delete_by_tenant removes exactly the keyed conversations" do
+        tenant = uid("tenant")
+        [a, b, other] = [uid("conv"), uid("conv"), uid("conv")]
+
+        for conv <- [a, b] do
+          :ok = @adapter.put_conversation(conv, %{settings: %{}, tenant_key: tenant})
+          {:ok, _seq} = @adapter.append_event(conv, Event.new(:user_msg, %{n: 1}))
+
+          :ok =
+            @adapter.upsert_tool_call(conv, %{
+              id: uid("tc"),
+              conversation_id: conv,
+              name: "t",
+              executor: :server,
+              args: %{}
+            })
+        end
+
+        :ok = @adapter.put_conversation(other, %{settings: %{}})
+        {:ok, _seq} = @adapter.append_event(other, Event.new(:user_msg, %{n: 1}))
+
+        assert @adapter.delete_by_tenant(tenant) == {:ok, 2}
+
+        assert @adapter.get_conversation(a) == nil
+        assert @adapter.get_conversation(b) == nil
+        assert @adapter.stream_events(a) == []
+        assert @adapter.pending_tool_calls(a) == []
+
+        # The untenanted conversation is untouched; an unknown key deletes nothing.
+        assert @adapter.get_conversation(other)
+        assert length(@adapter.stream_events(other)) == 1
+        assert @adapter.delete_by_tenant(uid("tenant")) == {:ok, 0}
+      end
     end
   end
 end

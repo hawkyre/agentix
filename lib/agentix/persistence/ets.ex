@@ -86,7 +86,7 @@ defmodule Agentix.Persistence.ETS do
   def put_conversation(conversation_id, attrs) do
     base =
       get_conversation(conversation_id) ||
-        %{id: conversation_id, settings: %{}, status: :active, fsm_state: %{}}
+        %{id: conversation_id, settings: %{}, status: :active, fsm_state: %{}, tenant_key: nil}
 
     record = base |> Map.merge(Map.new(attrs)) |> Map.put(:id, conversation_id)
     :ets.insert(@conversations, {conversation_id, record})
@@ -207,6 +207,23 @@ defmodule Agentix.Persistence.ETS do
     :ets.delete(@conversations, {:seq, conversation_id})
     :ets.delete(@conversations, conversation_id)
     :ok
+  end
+
+  @impl true
+  def delete_by_tenant(tenant_key) when is_binary(tenant_key) do
+    # Full-table scan — the conversations table also holds {:seq, id} counter
+    # entries, so match on map records only. Bulk delete is not a hot path.
+    ids =
+      @conversations
+      |> :ets.tab2list()
+      |> Enum.filter(fn
+        {id, %{tenant_key: ^tenant_key}} when is_binary(id) -> true
+        _ -> false
+      end)
+      |> Enum.map(fn {id, _record} -> id end)
+
+    Enum.each(ids, &delete_conversation/1)
+    {:ok, length(ids)}
   end
 
   # Every tool-call id for the conversation, regardless of status. Full-table
