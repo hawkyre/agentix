@@ -44,9 +44,9 @@ defmodule Agentix.Agent do
 
   ## Public addressing
 
-  @doc "The Registry `via` tuple for a conversation (the single addressing point)."
-  @spec via(String.t()) :: {:via, Registry, {Agentix.Registry, String.t()}}
-  def via(conversation_id), do: {:via, Registry, {Agentix.Registry, conversation_id}}
+  @doc "The `via` tuple for a conversation — the single addressing point."
+  @spec via(String.t()) :: {:via, module(), term()}
+  defdelegate via(conversation_id), to: Agentix.Addressing
 
   @typedoc "A point-in-time view of a conversation for a (re)connecting consumer."
   @type snapshot :: %{
@@ -110,9 +110,9 @@ defmodule Agentix.Agent do
   end
 
   defp live_turn(conversation_id) do
-    case Registry.lookup(Agentix.Registry, conversation_id) do
-      [{_pid, _}] -> :gen_statem.call(via(conversation_id), :snapshot)
-      [] -> idle_turn()
+    case Agentix.Addressing.whereis(conversation_id) do
+      {:ok, _pid} -> :gen_statem.call(via(conversation_id), :snapshot)
+      :error -> idle_turn()
     end
   catch
     # The agent may exit between the lookup and the call (crash, revival churn, a

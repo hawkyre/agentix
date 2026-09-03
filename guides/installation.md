@@ -136,6 +136,7 @@ Application config — `config :agentix, …` (all tiers):
 | `:pubsub`      | the `Phoenix.PubSub` server name (default `Agentix.PubSub`)             |
 | `:provider`    | LLM provider module (default `Agentix.Provider.ReqLLM`)                 |
 | `:tokenizer`   | tokenizer module (default `Agentix.Tokenizer.Heuristic`)               |
+| `:addressing`  | `:local` (default, node-local Registry) or `:global` (cluster-wide)      |
 | `:model_call_log` | `:off` (default), `:records` (call + usage + cost), `:full` (+ prompt) |
 | `:audit`       | **deprecated** — `true` means `model_call_log: :full`                   |
 

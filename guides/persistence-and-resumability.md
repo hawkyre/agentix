@@ -192,5 +192,9 @@ expire schedules the call itself.
 
 ## Open questions
 
-- Multi-node persistence story (follows the addressing question in `01`; out of
-  scope for v0).
+- Multi-node writes under a netsplit. `config :agentix, addressing: :global`
+  makes a conversation resolve to one agent cluster-wide, which is what keeps a
+  single writer on the log. A partition defeats it: both sides register an agent
+  and both write, and `:global` resolves the duplicate name on heal by killing
+  one — after the fact. Reconciling those writes is a log-level question, not a
+  registry one.

@@ -7,8 +7,8 @@ defmodule Agentix.Application do
   def start(_type, _args) do
     children =
       [
-        # Per-conversation agents are addressed through this registry — it is the
-        # single addressing point (Registry -> Horde/syn later).
+        # Backs `Agentix.Addressing` in `:local` mode. Started unconditionally so
+        # the mode can be switched at runtime.
         {Registry, keys: :unique, name: Agentix.Registry},
         # The default live-event backbone. A host that supervises its own
         # `Phoenix.PubSub` sets `config :agentix, :pubsub, MyApp.PubSub` and ignores

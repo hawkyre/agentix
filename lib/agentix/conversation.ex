@@ -3,7 +3,7 @@ defmodule Agentix.Conversation do
   The public entry points for driving a conversation.
 
   `ensure_started/2` is the **only** addressing point: it returns the live agent
-  (via `Agentix.Registry`) or starts and rehydrates one under
+  (via `Agentix.Addressing`) or starts and rehydrates one under
   `Agentix.ConversationSupervisor`. Both new messages and resolutions enter through
   it, so a conversation killed mid-flight is revived transparently on the next call.
 
@@ -136,6 +136,10 @@ defmodule Agentix.Conversation do
   Returns once the turn is actually down: the streaming task is terminated, the
   provider's cancel closure has run so the socket is closed, the partial
   assistant message is persisted and the conversation is back to idle.
+
+  Which agents this can reach depends on `Agentix.Addressing`. Under the default
+  `:local` mode a turn running on another node is not found, and the call
+  returns `:ok` having cancelled nothing.
   """
   @spec cancel(String.t()) :: :ok
   def cancel(conversation_id) do
@@ -162,12 +166,7 @@ defmodule Agentix.Conversation do
   end
 
   @spec lookup_agent(String.t()) :: {:ok, pid()} | :error
-  defp lookup_agent(conversation_id) do
-    case Registry.lookup(Agentix.Registry, conversation_id) do
-      [{pid, _}] -> {:ok, pid}
-      [] -> :error
-    end
-  end
+  defp lookup_agent(conversation_id), do: Agentix.Addressing.whereis(conversation_id)
 
   # The pid can die between lookup and terminate; :not_found is success here.
   @spec terminate_agent(pid()) :: :ok

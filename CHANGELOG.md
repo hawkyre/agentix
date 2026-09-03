@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-03
+
+### Added
+
+- **`config :agentix, :addressing`** — `:local` (default, unchanged behaviour) or
+  `:global`. Under `:global`, a conversation resolves to the same agent from
+  every node in the cluster, through Erlang's `:global` registry.
+
+  This is a correctness fix for multi-node hosts, not a convenience. A
+  conversation is meant to have exactly one agent because that agent is the
+  single writer of its durable log. Under node-local addressing on two nodes,
+  each node's `ensure_started/2` finds nothing locally and starts its own, so two
+  agents interleave writes to one conversation. `cancel/1` had the mirror
+  problem: a turn running elsewhere was not found, and the call returned `:ok`
+  having cancelled nothing.
+
+  Under `:global` the second start loses with `{:error, {:already_started, pid}}`
+  — already handled — and every entry verb reaches the live agent wherever it
+  runs. The cost is that registration is a cluster-wide synchronous operation, so
+  starting a conversation gets slower as nodes are added; it suits coarse
+  conversations rather than one per request. A netsplit is out of its reach and
+  documented as such.
+
+- `Agentix.Addressing` — `mode/0`, `via/1`, `whereis/1`. The agent's internal
+  addressing delegates to it, so the `via` seam its docs always promised is real.
+
+### Documented
+
+- `Conversation.cancel/1` states what it already did: it returns only once the
+  streaming task is terminated, the provider's cancel closure has run, the
+  partial assistant message is persisted and the conversation is idle.
+
 ## [0.5.1] - 2026-09-03
 
 ### Fixed
