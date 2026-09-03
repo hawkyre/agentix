@@ -161,7 +161,8 @@ defmodule Agentix.Agent do
       {:ok, config} ->
         Persistence.put_conversation(conversation_id, %{
           settings: Map.from_struct(config),
-          tenant_key: config.tenant_key
+          tenant_key: config.tenant_key,
+          feature: config.feature
         })
 
         {summary, events} = Persistence.load_since(conversation_id)

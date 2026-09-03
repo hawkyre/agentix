@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-03
+
+### Fixed
+
+- `feature` now lands on the `agentix_conversations` **column**, not only inside
+  the settings blob. `init/1` wrote `tenant_key` and not `feature`, so the column
+  a host queries and joins on stayed null while the config that set it looked
+  correct. Model-call rows were unaffected — they take the feature straight from
+  the config.
+
 ## [0.5.0] - 2026-09-03
 
 ### Added

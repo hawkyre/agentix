@@ -88,6 +88,16 @@ defmodule Agentix.ModelCallLogTest do
     end
   end
 
+  describe "the conversation record" do
+    test "carries the feature as a column, not only inside settings", %{id: id} do
+      MockProvider.script(completion("hi"))
+      run(id, config(:records))
+      assert_receive {:turn_completed, _ref}, 1_000
+
+      assert Persistence.get_conversation(id).feature == "extraction"
+    end
+  end
+
   describe "outcomes" do
     test "a failed call is recorded with its reason and no usage", %{id: id} do
       MockProvider.script(error(500, reason: "upstream exploded"))
