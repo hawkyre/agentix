@@ -12,12 +12,18 @@ defmodule Agentix.Persistence do
 
   ## Record shapes
 
-    * **conversation** — `%{id, settings, status, fsm_state, tenant_key}` (`tenant_key`
-      nil for untenanted conversations).
+    * **conversation** — `%{id, settings, status, fsm_state, tenant_key, feature}`
+      (`tenant_key` nil for untenanted conversations, `feature` nil for
+      unlabelled ones).
     * **fsm_state** — `%{state, pending, last_seq}` (a cache over the log).
     * **summary** — `%{from_seq, to_seq, content, version}` (+ adapter-assigned id/inserted_at).
     * **tool_call** — `%{id, conversation_id, executor, status, args, result, ...}`.
-    * **model_call** — `%{turn_ref, rendered_context, model, usage, ...}` (audit, off by default).
+    * **model_call** — `%{turn_ref, model, usage, latency_ms, status, error,
+      tenant_key, feature, pricing_version, rendered_context, ...}`. One per
+      provider call, at whatever detail `model_call_log` asks for (off by
+      default; `rendered_context` is nil below `:full`). `status` is
+      `:ok | :error | :cancelled` — a failed or cancelled call reports no usage
+      but is still recorded.
 
   Configure with `config :agentix, :persistence, Agentix.Persistence.ETS` (or
   `{module, opts}`).
@@ -124,17 +130,19 @@ defmodule Agentix.Persistence do
   @callback cancel_expiry(conversation_id(), tool_call_id()) :: :ok
 
   @doc """
-  Records a `model_call` audit row (exactly what was rendered to the model that
-  turn). **A no-op unless the audit flag is enabled** (`config :agentix, :audit`).
+  Records one `model_call` row. Adapters persist what they are given — whether a
+  call is recorded at all, and at what detail, is the agent's decision from
+  `model_call_log`.
   """
   @callback put_model_call(conversation_id(), model_call()) :: :ok
 
-  @doc "Returns the conversation's audit rows ordered by `turn_ref` (empty when audit is off)."
+  @doc "Returns the conversation's model-call rows ordered by `turn_ref`."
   @callback model_calls(conversation_id()) :: [model_call()]
 
   @doc """
-  Deletes audit rows older than `ttl_ms` (relative to now) for the conversation,
-  returning the count removed. Used for TTL-based GC of the audit table.
+  Deletes model-call rows older than `ttl_ms` (relative to now) for the
+  conversation, returning the count removed. Offered for hosts that want the
+  rows to expire; nothing in Agentix schedules it.
   """
   @callback gc_model_calls(conversation_id(), non_neg_integer()) :: {:ok, non_neg_integer()}
 

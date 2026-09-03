@@ -218,4 +218,55 @@ defmodule Agentix.Conversation.ConfigTest do
       end
     end
   end
+
+  describe "feature" do
+    test "accepts nil and a non-empty string" do
+      assert Config.new(model: "m").feature == nil
+      assert Config.new(model: "m", feature: "extraction").feature == "extraction"
+    end
+
+    test "rejects an empty string, a non-string, and one too large to index" do
+      for invalid <- ["", :extraction, String.duplicate("a", 3000)] do
+        assert_raise ArgumentError, ~r/feature must be/, fn ->
+          Config.new(model: "m", feature: invalid)
+        end
+      end
+    end
+  end
+
+  describe "model_call_log" do
+    test "defaults to off" do
+      assert Config.new(model: "m").model_call_log == :off
+    end
+
+    test "accepts each level" do
+      for level <- [:off, :records, :full] do
+        assert Config.new(model: "m", model_call_log: level).model_call_log == level
+      end
+    end
+
+    test "rejects an unknown level" do
+      assert_raise ArgumentError, ~r/model_call_log must be/, fn ->
+        Config.new(model: "m", model_call_log: :some)
+      end
+    end
+
+    # Conversations persisted before the field existed revive carrying only
+    # `audit?`; they must keep recording what they were configured to record.
+    test "falls back to the deprecated audit? flag" do
+      assert Config.new(model: "m", audit?: true).model_call_log == :full
+      assert Config.new(model: "m", audit?: false).model_call_log == :off
+    end
+
+    test "an explicit level wins over audit?" do
+      config = Config.new(model: "m", audit?: true, model_call_log: :records)
+      assert config.model_call_log == :records
+    end
+
+    # The Ecto adapter round-trips settings as JSON, so the level comes back a string.
+    test "accepts the level as a string after a JSON round-trip" do
+      assert Config.new(%{"model" => "m", "model_call_log" => "records"}).model_call_log ==
+               :records
+    end
+  end
 end

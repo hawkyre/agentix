@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-03
+
+### Added
+
+- **`model_call_log`** — durable records of provider calls, replacing the
+  `audit?` boolean with three levels on `Agentix.Conversation.Config` (and as
+  application config): `:off` (the default, unchanged), `:records` (one row per
+  call carrying model, usage, latency, outcome, `tenant_key` and `feature`, with
+  **no** prompt), and `:full` (the same row plus `rendered_context`). The middle
+  level is the one that did not exist before: a row small enough to keep
+  indefinitely, which is what a host needs to answer "what did this tenant
+  spend" without also storing every prompt forever.
+- **Calls are recorded at every outcome, not only on success.** A failed call
+  writes a row with `status: :error` and the provider's reason; a cancelled turn
+  writes `status: :cancelled`. The cancelled case is only reachable here:
+  cancelling kills the streaming task, so its telemetry span emits no terminal
+  event at all and a handler counting spend from telemetry misses it silently.
+- **`feature`** — an optional label on `Agentix.Conversation.Config` for the part
+  of the host application a conversation serves. Stored on the conversation and
+  mirrored onto every model-call row, indexed as `(tenant_key, feature,
+  inserted_at)`, so spend by feature is one query with no join. Unlike
+  `tenant_key` it is a label, not an isolation boundary — nothing selects or
+  deletes by it.
+- `tenant_key` is now mirrored onto model-call rows too, so the rows stay
+  attributable after their conversation is deleted.
+- `pricing_version` on each row — the `llm_db` catalog version that costed the
+  call, so a later price correction is traceable rather than a silent rewrite.
+- `latency_ms` is now actually populated. The column existed since the audit
+  table was introduced and was never written.
+
+### Changed
+
+- `put_model_call/2` persists whatever it is given. Whether a call is recorded,
+  and at what detail, is the agent's decision — adapters no longer consult
+  application config themselves.
+- `gc_model_calls/2` is documented as offered-but-unscheduled, with the reason:
+  under `:full` the rows are the fastest-growing table in the schema, while under
+  `:records` they are usually the host's accounting record and expiring them
+  deletes it. Agentix will not pick for you.
+
+### Breaking
+
+- **`agentix_model_calls` gained columns and `rendered_context` became
+  nullable.** Hosts that ran `create_agentix_tables.exs` before 0.5.0 must apply
+  `priv/templates/migration/upgrade_agentix_model_calls.exs`; a fresh install
+  gets everything from the create migration and must not run it. The upgrade
+  backfills `tenant_key` from each row's surviving conversation.
+- `Config.audit?` is deprecated but still accepted and still means `:full`, at
+  both the conversation and application level, so conversations persisted before
+  this release revive with the recording they were configured for. It will be
+  removed in a later release.
+
 ## [0.4.0] - 2026-08-23
 
 ### Added

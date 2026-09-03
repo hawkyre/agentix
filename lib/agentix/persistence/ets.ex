@@ -86,7 +86,14 @@ defmodule Agentix.Persistence.ETS do
   def put_conversation(conversation_id, attrs) do
     base =
       get_conversation(conversation_id) ||
-        %{id: conversation_id, settings: %{}, status: :active, fsm_state: %{}, tenant_key: nil}
+        %{
+          id: conversation_id,
+          settings: %{},
+          status: :active,
+          fsm_state: %{},
+          tenant_key: nil,
+          feature: nil
+        }
 
     record = base |> Map.merge(Map.new(attrs)) |> Map.put(:id, conversation_id)
     :ets.insert(@conversations, {conversation_id, record})
@@ -163,15 +170,12 @@ defmodule Agentix.Persistence.ETS do
 
   @impl true
   def put_model_call(conversation_id, model_call) do
-    if audit_enabled?() do
-      record =
-        model_call
-        |> Map.put(:conversation_id, conversation_id)
-        |> Map.put_new(:inserted_at, DateTime.utc_now())
+    record =
+      model_call
+      |> Map.put(:conversation_id, conversation_id)
+      |> Map.put_new(:inserted_at, DateTime.utc_now())
 
-      :ets.insert(@model_calls, {{conversation_id, record.turn_ref}, record})
-    end
-
+    :ets.insert(@model_calls, {{conversation_id, record.turn_ref}, record})
     :ok
   end
 
@@ -235,6 +239,4 @@ defmodule Agentix.Persistence.ETS do
     |> Enum.filter(fn {_id, record} -> record.conversation_id == conversation_id end)
     |> Enum.map(fn {id, _record} -> id end)
   end
-
-  defp audit_enabled?, do: Application.get_env(:agentix, :audit, false)
 end

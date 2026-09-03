@@ -130,7 +130,13 @@ defmodule Agentix.Conversation do
     do:
       ":schema must be false, nil, a non-empty keyword, or a non-empty map, got: #{inspect(value)}"
 
-  @doc "Cancels the in-flight turn from any non-idle state. A no-op if not running."
+  @doc """
+  Cancels the in-flight turn from any non-idle state. A no-op if not running.
+
+  Returns once the turn is actually down: the streaming task is terminated, the
+  provider's cancel closure has run so the socket is closed, the partial
+  assistant message is persisted and the conversation is back to idle.
+  """
   @spec cancel(String.t()) :: :ok
   def cancel(conversation_id) do
     case lookup_agent(conversation_id) do

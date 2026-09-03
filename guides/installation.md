@@ -115,8 +115,13 @@ The template creates the tables once, at install time — it is not re-run on up
 you ran it on a version before `tenant_key` existed (0.3.x and earlier), add the column
 with your own migration (the exact snippet is in the CHANGELOG's 0.4.0 Breaking section).
 
-Durable expiry is scheduled as Oban jobs. The audit log of model calls is off by default;
-enable it with `config :agentix, audit: true`. See `examples/agentix_demo` for the full
+If you ran it before 0.5.0, apply `upgrade_agentix_model_calls.exs` from the same
+directory — a fresh install already has those columns and must not run it.
+
+Durable expiry is scheduled as Oban jobs. Recording model calls is off by default;
+turn it on with `config :agentix, model_call_log: :records` for cost and
+observability, or `:full` to also store each rendered prompt for replay. See
+`examples/agentix_demo` for the full
 wiring, including a Postgres-backed `Phoenix.LiveViewTest` that drives a HITL elicitation
 end-to-end.
 
@@ -131,7 +136,8 @@ Application config — `config :agentix, …` (all tiers):
 | `:pubsub`      | the `Phoenix.PubSub` server name (default `Agentix.PubSub`)             |
 | `:provider`    | LLM provider module (default `Agentix.Provider.ReqLLM`)                 |
 | `:tokenizer`   | tokenizer module (default `Agentix.Tokenizer.Heuristic`)               |
-| `:audit`       | record per-turn model-call audit rows (default `false`)                |
+| `:model_call_log` | `:off` (default), `:records` (call + usage + cost), `:full` (+ prompt) |
+| `:audit`       | **deprecated** — `true` means `model_call_log: :full`                   |
 
 Per-conversation options are passed to `Agentix.Conversation.Config.new/1` (**not**
 application config): `:model`, `:system_prompt`, `:tools`, `:hooks`, `:working_budget`

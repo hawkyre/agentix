@@ -134,7 +134,8 @@ if Code.ensure_loaded?(Ecto) do
             settings: row.settings,
             status: row.status,
             fsm_state: decode_fsm_state(row.fsm_state),
-            tenant_key: row.tenant_key
+            tenant_key: row.tenant_key,
+            feature: row.feature
           }
       end
     end
@@ -149,7 +150,8 @@ if Code.ensure_loaded?(Ecto) do
         settings: sanitize_settings(Map.get(attrs, :settings, base.settings || %{})),
         fsm_state: Map.get(attrs, :fsm_state, base.fsm_state || %{}),
         status: Map.get(attrs, :status, base.status || :active),
-        tenant_key: Map.get(attrs, :tenant_key, base.tenant_key)
+        tenant_key: Map.get(attrs, :tenant_key, base.tenant_key),
+        feature: Map.get(attrs, :feature, base.feature)
       })
       |> repo().insert_or_update!()
 
@@ -312,29 +314,32 @@ if Code.ensure_loaded?(Ecto) do
 
     @impl true
     def put_model_call(conversation_id, model_call) do
-      if audit_enabled?() do
-        ensure_conversation(conversation_id)
+      ensure_conversation(conversation_id)
 
-        attrs =
-          model_call
-          |> Map.new()
-          |> Map.put(:conversation_id, conversation_id)
-          |> Map.put_new(:inserted_at, DateTime.utc_now())
+      attrs =
+        model_call
+        |> Map.new()
+        |> Map.put(:conversation_id, conversation_id)
+        |> Map.put_new(:inserted_at, DateTime.utc_now())
 
-        %ModelCall{}
-        |> Ecto.Changeset.cast(attrs, [
-          :conversation_id,
-          :turn_ref,
-          :rendered_context,
-          :model,
-          :usage,
-          :latency_ms,
-          :summary_version,
-          :evictions,
-          :inserted_at
-        ])
-        |> repo().insert!()
-      end
+      %ModelCall{}
+      |> Ecto.Changeset.cast(attrs, [
+        :conversation_id,
+        :turn_ref,
+        :rendered_context,
+        :model,
+        :usage,
+        :latency_ms,
+        :status,
+        :error,
+        :tenant_key,
+        :feature,
+        :pricing_version,
+        :summary_version,
+        :evictions,
+        :inserted_at
+      ])
+      |> repo().insert!()
 
       :ok
     end
@@ -427,6 +432,11 @@ if Code.ensure_loaded?(Ecto) do
         model: row.model,
         usage: row.usage,
         latency_ms: row.latency_ms,
+        status: row.status,
+        error: row.error,
+        tenant_key: row.tenant_key,
+        feature: row.feature,
+        pricing_version: row.pricing_version,
         summary_version: row.summary_version,
         evictions: row.evictions,
         inserted_at: row.inserted_at
@@ -496,8 +506,6 @@ if Code.ensure_loaded?(Ecto) do
                   "{Agentix.Persistence.Ecto, repo: MyRepo}, got: #{inspect(other)}"
       end
     end
-
-    defp audit_enabled?, do: Application.get_env(:agentix, :audit, false)
 
     defp oban_available?, do: Code.ensure_loaded?(Oban)
 

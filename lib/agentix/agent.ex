@@ -436,6 +436,10 @@ defmodule Agentix.Agent do
       task_pid: nil,
       monitor_ref: nil,
       cancel: nil,
+      # Monotonic start of the provider call currently in flight, nil between
+      # calls. Both the latency measurement and the "was a call actually open?"
+      # test for `record_model_call/4` read it.
+      call_started_at: nil,
       context: nil,
       text: "",
       thinking: "",
@@ -486,7 +490,15 @@ defmodule Agentix.Agent do
       %{conversation_id: data.conversation_id, turn_ref: turn.ref}
     )
 
-    data = put_in(data.turn, %{turn | task_pid: pid, monitor_ref: ref, context: context})
+    data =
+      put_in(data.turn, %{
+        turn
+        | task_pid: pid,
+          monitor_ref: ref,
+          context: context,
+          call_started_at: System.monotonic_time()
+      })
+
     Publisher.state_changed(data.publisher, :streaming)
     {:next_state, :streaming, data}
   end
@@ -513,7 +525,7 @@ defmodule Agentix.Agent do
     drop_monitor(turn)
     message = put_msg_id(message, turn.msg_id)
     {:ok, seq} = append_event(data, :assistant_msg, message_content(message))
-    data = maybe_audit(%{data | last_seq: seq}, message, usage)
+    data = record_model_call(%{data | last_seq: seq}, :ok, usage, nil)
 
     Publisher.message_completed(data.publisher, turn.ref, message)
 
@@ -571,6 +583,7 @@ defmodule Agentix.Agent do
     drop_monitor(turn)
     Logger.warning("agentix stream failed: #{inspect(reason)}")
 
+    data = record_model_call(data, :error, nil, describe_error(reason))
     data = record_partial(data, :error)
     # Provider/stream failures get their own terminal event, WITH the reason —
     # `cancelled` stays reserved for user-initiated cancellation, so a consumer
@@ -597,6 +610,9 @@ defmodule Agentix.Agent do
     if is_function(turn.cancel, 0), do: turn.cancel.()
 
     data = cancel_tool_calls(data)
+    # Killing the streaming task means its telemetry span never closes, so this
+    # is the only record a cancelled call leaves anywhere.
+    data = record_model_call(data, :cancelled, nil, nil)
     data = record_partial(data, :cancelled)
     Publisher.cancelled(data.publisher, turn.ref)
 
@@ -1581,39 +1597,95 @@ defmodule Agentix.Agent do
     end
   end
 
-  ## Audit (model_calls — off unless enabled)
+  ## Model-call records (see `model_call_log` in `Agentix.Conversation.Config`)
 
-  defp maybe_audit(data, _message, usage) do
-    if audit?(data.config) do
+  # Called from all three terminals of a provider call: completion, failure, and
+  # cancellation. A failed or cancelled call has no usage — the provider reports
+  # it only once the stream assembles — but it took time and may well have spent
+  # tokens, so the row exists and says so rather than the call vanishing.
+  #
+  # `call_started_at` is the guard against double-counting: it is set when the
+  # streaming task starts and cleared when the call ends, so a turn cancelled
+  # while running tools (its model call long since recorded) writes nothing here.
+  defp record_model_call(data, status, usage, error) do
+    level = model_call_log(data.config)
+
+    if (level != :off and data.turn) && data.turn.call_started_at do
       seq = data.model_call_seq + 1
 
       Persistence.put_model_call(data.conversation_id, %{
         turn_ref: seq,
-        rendered_context: encode_context(data.turn.context),
+        rendered_context: rendered_context(level, data.turn.context),
         model: data.config.model,
-        usage: usage || %{}
+        usage: usage || %{},
+        latency_ms: elapsed_ms(data.turn.call_started_at),
+        status: status,
+        error: error,
+        tenant_key: data.config.tenant_key,
+        feature: data.config.feature,
+        pricing_version: pricing_version()
       })
 
-      %{data | model_call_seq: seq}
+      %{data | model_call_seq: seq, turn: %{data.turn | call_started_at: nil}}
     else
       data
     end
   end
 
-  defp audit?(%Config{audit?: true}), do: true
-  defp audit?(_config), do: Application.get_env(:agentix, :audit, false)
+  # Chosen cap: long enough to identify a provider failure, short enough that a
+  # crash loop cannot fill the column with stacktraces.
+  @max_error_bytes 500
 
-  # Restore the per-model-call counter on revival so audit rows keyed by `turn_ref`
-  # are appended after the pre-crash rows instead of overwriting them. Only the audit
-  # table is consulted, and only when audit is on (it is empty otherwise).
+  defp describe_error(reason) do
+    reason
+    |> inspect(printable_limit: @max_error_bytes)
+    |> String.slice(0, @max_error_bytes)
+  end
+
+  # `:records` deliberately stores no prompt: the point of that level is a small
+  # row per call that a host can keep indefinitely.
+  defp rendered_context(:full, context), do: encode_context(context)
+  defp rendered_context(_level, _context), do: nil
+
+  # A conversation can raise the level above the application default but not
+  # below it, which is how `audit?` behaved before it: the host-wide setting is
+  # the floor. `:audit` is still honoured so an app configured before 0.5.0 keeps
+  # recording what it recorded.
+  defp model_call_log(%Config{model_call_log: level}) when level in [:records, :full], do: level
+
+  defp model_call_log(_config) do
+    case Application.get_env(:agentix, :model_call_log) do
+      level when level in [:off, :records, :full] ->
+        level
+
+      _unset ->
+        if Application.get_env(:agentix, :audit, false), do: :full, else: :off
+    end
+  end
+
+  defp elapsed_ms(started_at),
+    do: System.convert_time_unit(System.monotonic_time() - started_at, :native, :millisecond)
+
+  # The catalog that priced this call. ReqLLM computes cost against `llm_db`, a
+  # date-versioned price list, so the row records which version applied — a later
+  # price correction is then traceable instead of silently rewriting history.
+  defp pricing_version do
+    case Application.spec(:llm_db, :vsn) do
+      nil -> nil
+      vsn -> to_string(vsn)
+    end
+  end
+
+  # Restore the per-model-call counter on revival so rows keyed by `turn_ref` are
+  # appended after the pre-crash rows instead of overwriting them.
   defp last_model_call_seq(conversation_id, config) do
-    if audit?(config) do
+    if model_call_log(config) == :off do
+      0
+    else
       conversation_id
       |> Persistence.model_calls()
       |> Enum.map(& &1.turn_ref)
       |> Enum.max(fn -> 0 end)
-    else
-      0
     end
   end
 
