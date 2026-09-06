@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-05
+
+### Fixed
+
+- Summary calls save returned usage and costs according to `model_call_log`.
+- Each retry attempt gets a call record. Failures without reported usage keep
+  an empty usage map. Call latency excludes retry delays.
+- Concurrent summary and conversation calls receive distinct record references.
+- Cancellation preserves queued provider outcomes and creates no extra call
+  record during retry delays.
+- A provider that exits without returning a response fails the turn.
+
+### Added
+
+- Optional `Agentix.Persistence.append_model_call/2` callback for atomic reference
+  allocation and insertion. Existing adapters use a compatibility fallback.
+  No database migration is required for this update.
+
 ## [0.5.2] - 2026-09-03
 
 ### Added
@@ -264,7 +282,11 @@ First public release.
 - Modern tooling: Credo, Dialyxir, Styler, ExCoveralls, MixAudit, ExDoc, and a
   `mix check` quality gate.
 
-[Unreleased]: https://github.com/hawkyre/agentix/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/hawkyre/agentix/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/hawkyre/agentix/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/hawkyre/agentix/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/hawkyre/agentix/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/hawkyre/agentix/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/hawkyre/agentix/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/hawkyre/agentix/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hawkyre/agentix/compare/v0.1.0...v0.2.0
