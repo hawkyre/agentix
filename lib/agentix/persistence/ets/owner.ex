@@ -1,6 +1,6 @@
 defmodule Agentix.Persistence.ETS.Owner do
   @moduledoc false
-  # Owns the ETS adapter's named public tables and serializes the operations that
+  # Owns the ETS tables and serializes model-call writes and tool-call resolution.
 
   use GenServer
 
@@ -30,6 +30,14 @@ defmodule Agentix.Persistence.ETS.Owner do
   def cancel_expiry(conversation_id, tool_call_id),
     do: GenServer.call(__MODULE__, {:cancel_expiry, conversation_id, tool_call_id})
 
+  @spec put_model_call(String.t(), map()) :: :ok
+  def put_model_call(conversation_id, model_call),
+    do: GenServer.call(__MODULE__, {:put_model_call, conversation_id, model_call})
+
+  @spec append_model_call(String.t(), map()) :: :ok
+  def append_model_call(conversation_id, model_call),
+    do: GenServer.call(__MODULE__, {:append_model_call, conversation_id, model_call})
+
   @impl true
   def init(:ok) do
     Enum.each(@tables, fn {name, type} ->
@@ -42,6 +50,21 @@ defmodule Agentix.Persistence.ETS.Owner do
   @impl true
   def handle_call({:resolve, tool_call_id, status, result}, _from, state) do
     {:reply, do_resolve(tool_call_id, status, result), state}
+  end
+
+  def handle_call({:put_model_call, conversation_id, model_call}, _from, state) do
+    {:reply, store_model_call(conversation_id, model_call), state}
+  end
+
+  def handle_call({:append_model_call, conversation_id, model_call}, _from, state) do
+    turn_ref =
+      case :ets.prev(:agentix_model_calls, {conversation_id, :infinity}) do
+        {^conversation_id, last_ref} when is_integer(last_ref) -> last_ref + 1
+        _ -> 1
+      end
+
+    record = Map.put(model_call, :turn_ref, turn_ref)
+    {:reply, store_model_call(conversation_id, record), state}
   end
 
   def handle_call({:schedule_expiry, conversation_id, tool_call_id, timeout_ms}, _from, state) do
@@ -67,6 +90,16 @@ defmodule Agentix.Persistence.ETS.Owner do
   def handle_info({:expire, {_conv, tool_call_id} = key}, state) do
     do_resolve(tool_call_id, :expired, @expired_result)
     {:noreply, %{state | timers: Map.delete(state.timers, key)}}
+  end
+
+  defp store_model_call(conversation_id, model_call) do
+    record =
+      model_call
+      |> Map.put(:conversation_id, conversation_id)
+      |> Map.put_new(:inserted_at, DateTime.utc_now())
+
+    :ets.insert(:agentix_model_calls, {{conversation_id, record.turn_ref}, record})
+    :ok
   end
 
   defp do_resolve(tool_call_id, status, result) do

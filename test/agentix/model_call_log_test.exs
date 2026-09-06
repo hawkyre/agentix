@@ -1,3 +1,35 @@
+defmodule Agentix.ModelCallLogTest.GatedProvider do
+  @moduledoc false
+  @behaviour Agentix.Provider
+
+  alias Agentix.Test.MockProvider
+
+  @impl true
+  def stream(model, context, opts) do
+    test_pid = Application.fetch_env!(:agentix, :gated_provider_test_pid)
+    send(test_pid, {:provider_waiting, self()})
+
+    receive do
+      :release_provider -> :ok
+    end
+
+    case MockProvider.stream(model, context, opts) do
+      {:ok, stream} ->
+        {:ok,
+         %{
+           stream
+           | cancel: fn ->
+               send(test_pid, :provider_cancelled)
+               stream.cancel.()
+             end
+         }}
+
+      error ->
+        error
+    end
+  end
+end
+
 defmodule Agentix.ModelCallLogTest do
   @moduledoc """
   What `model_call_log` records, at each level and for each way a provider call
@@ -14,6 +46,7 @@ defmodule Agentix.ModelCallLogTest do
   alias Agentix.Conversation
   alias Agentix.Conversation.Config
   alias Agentix.Events.Publisher
+  alias Agentix.ModelCallLogTest.GatedProvider
   alias Agentix.Persistence
   alias Agentix.Scope
   alias Agentix.Test.MockProvider
@@ -129,6 +162,60 @@ defmodule Agentix.ModelCallLogTest do
   end
 
   describe "double counting" do
+    test "cancellation preserves a failure queued by the provider", %{id: id} do
+      gate_provider()
+      MockProvider.script(error(503))
+      run(id, config(:records))
+      assert_receive {:provider_waiting, task_pid}
+      {:ok, agent_pid} = Agentix.Addressing.whereis(id)
+
+      :ok = :sys.suspend(agent_pid)
+
+      cancel_request =
+        try do
+          request = :gen_statem.send_request(agent_pid, :cancel)
+          send(task_pid, :release_provider)
+          wait_for_failure_request(agent_pid)
+          request
+        after
+          :sys.resume(agent_pid)
+        end
+
+      assert {:reply, :ok} = :gen_statem.wait_response(cancel_request, 1_000)
+      assert_receive {:cancelled, _ref}
+      assert [call] = Persistence.model_calls(id)
+      assert call.status == :error
+      assert call.error =~ "503"
+      assert call.usage == %{}
+    end
+
+    test "cancellation preserves usage returned before the agent handles completion", %{id: id} do
+      gate_provider()
+      usage = %{input_tokens: 14, total_cost: 6.8e-5}
+      MockProvider.script(completion("done", usage: usage))
+      run(id, config(:records))
+      assert_receive {:provider_waiting, task_pid}
+      {:ok, agent_pid} = Agentix.Addressing.whereis(id)
+      monitor = Process.monitor(task_pid)
+
+      :ok = :sys.suspend(agent_pid)
+
+      cancel_request =
+        try do
+          request = :gen_statem.send_request(agent_pid, :cancel)
+          send(task_pid, :release_provider)
+          assert_receive {:DOWN, ^monitor, :process, ^task_pid, :normal}
+          request
+        after
+          :sys.resume(agent_pid)
+        end
+
+      assert {:reply, :ok} = :gen_statem.wait_response(cancel_request, 1_000)
+      assert_receive {:cancelled, _ref}
+      assert_receive :provider_cancelled
+      assert [%{status: :ok, usage: ^usage}] = Persistence.model_calls(id)
+    end
+
     test "a second turn records a second call, keeping turn_ref ordered", %{id: id} do
       MockProvider.script(completion("one"))
       run(id, config(:records))
@@ -150,6 +237,33 @@ defmodule Agentix.ModelCallLogTest do
 
       # Still one row: the completed call, not a phantom cancelled one.
       assert [%{status: :ok}] = Persistence.model_calls(id)
+    end
+  end
+
+  defp gate_provider do
+    Application.put_env(:agentix, :provider, GatedProvider)
+    Application.put_env(:agentix, :gated_provider_test_pid, self())
+
+    on_exit(fn ->
+      Application.delete_env(:agentix, :gated_provider_test_pid)
+      Application.put_env(:agentix, :provider, MockProvider)
+    end)
+  end
+
+  defp wait_for_failure_request(pid) do
+    deadline = System.monotonic_time(:millisecond) + ExUnit.configuration()[:assert_receive_timeout]
+    wait_for_failure_request(pid, deadline)
+  end
+
+  defp wait_for_failure_request(pid, deadline) do
+    {:messages, messages} = Process.info(pid, :messages)
+
+    if Enum.any?(messages, &match?({:"$gen_call", _, {:model_call_failed, _, _}}, &1)) do
+      :ok
+    else
+      assert System.monotonic_time(:millisecond) < deadline, "provider failure did not arrive"
+      Process.sleep(1)
+      wait_for_failure_request(pid, deadline)
     end
   end
 end

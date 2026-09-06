@@ -314,8 +314,42 @@ if Code.ensure_loaded?(Ecto) do
 
     @impl true
     def put_model_call(conversation_id, model_call) do
-      ensure_conversation(conversation_id)
+      with_model_call_lock(conversation_id, fn ->
+        insert_model_call(conversation_id, model_call)
+      end)
+    end
 
+    @impl true
+    def append_model_call(conversation_id, model_call) do
+      with_model_call_lock(conversation_id, fn ->
+        last_ref =
+          repo().one(
+            from(m in ModelCall,
+              where: m.conversation_id == ^conversation_id,
+              select: max(m.turn_ref)
+            )
+          )
+
+        insert_model_call(conversation_id, Map.put(model_call, :turn_ref, (last_ref || 0) + 1))
+      end)
+    end
+
+    defp with_model_call_lock(conversation_id, fun) do
+      {:ok, :ok} =
+        repo().transact(fn ->
+          ensure_conversation(conversation_id)
+
+          repo().one!(
+            from(c in Conversation, where: c.id == ^conversation_id, lock: "FOR NO KEY UPDATE")
+          )
+
+          {:ok, fun.()}
+        end)
+
+      :ok
+    end
+
+    defp insert_model_call(conversation_id, model_call) do
       attrs =
         model_call
         |> Map.new()

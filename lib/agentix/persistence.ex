@@ -136,6 +136,11 @@ defmodule Agentix.Persistence do
   """
   @callback put_model_call(conversation_id(), model_call()) :: :ok
 
+  @doc "Assigns the next stored `turn_ref` and inserts the model call atomically."
+  @callback append_model_call(conversation_id(), model_call()) :: :ok
+
+  @optional_callbacks append_model_call: 2
+
   @doc "Returns the conversation's model-call rows ordered by `turn_ref`."
   @callback model_calls(conversation_id()) :: [model_call()]
 
@@ -235,6 +240,31 @@ defmodule Agentix.Persistence do
   @spec put_model_call(conversation_id(), model_call()) :: :ok
   def put_model_call(conversation_id, model_call),
     do: adapter().put_model_call(conversation_id, model_call)
+
+  @spec append_model_call(conversation_id(), model_call()) :: :ok
+  def append_model_call(conversation_id, model_call) do
+    adapter = adapter()
+    Code.ensure_loaded!(adapter)
+
+    if function_exported?(adapter, :append_model_call, 2) do
+      adapter.append_model_call(conversation_id, model_call)
+    else
+      append_with_lock(adapter, conversation_id, model_call)
+    end
+  end
+
+  defp append_with_lock(adapter, conversation_id, model_call) do
+    :ok =
+      :global.trans({{__MODULE__, conversation_id}, self()}, fn ->
+        turn_ref =
+          conversation_id
+          |> adapter.model_calls()
+          |> Enum.reduce(0, fn call, last_ref -> max(call.turn_ref, last_ref) end)
+          |> Kernel.+(1)
+
+        adapter.put_model_call(conversation_id, Map.put(model_call, :turn_ref, turn_ref))
+      end)
+  end
 
   @spec model_calls(conversation_id()) :: [model_call()]
   def model_calls(conversation_id), do: adapter().model_calls(conversation_id)

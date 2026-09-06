@@ -169,15 +169,12 @@ defmodule Agentix.Persistence.ETS do
     do: Owner.cancel_expiry(conversation_id, tool_call_id)
 
   @impl true
-  def put_model_call(conversation_id, model_call) do
-    record =
-      model_call
-      |> Map.put(:conversation_id, conversation_id)
-      |> Map.put_new(:inserted_at, DateTime.utc_now())
+  def put_model_call(conversation_id, model_call),
+    do: Owner.put_model_call(conversation_id, model_call)
 
-    :ets.insert(@model_calls, {{conversation_id, record.turn_ref}, record})
-    :ok
-  end
+  @impl true
+  def append_model_call(conversation_id, model_call),
+    do: Owner.append_model_call(conversation_id, model_call)
 
   @impl true
   def model_calls(conversation_id) do

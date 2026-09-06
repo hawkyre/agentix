@@ -12,6 +12,7 @@ defmodule Agentix.Agent do
   alias Agentix.Hook
   alias Agentix.Hook.OverflowError
   alias Agentix.Hook.Pipeline
+  alias Agentix.ModelCall
   alias Agentix.Persistence
   alias Agentix.Provider
   alias Agentix.Scope
@@ -37,7 +38,6 @@ defmodule Agentix.Agent do
       :config,
       :publisher,
       last_seq: 0,
-      model_call_seq: 0,
       turn: nil
     ]
   end
@@ -172,8 +172,7 @@ defmodule Agentix.Agent do
           conversation_id: conversation_id,
           config: config,
           publisher: Publisher.new(config, conversation_id),
-          last_seq: last_seq,
-          model_call_seq: last_model_call_seq(conversation_id, config)
+          last_seq: last_seq
         }
 
         {state, data, actions} = revive(data, events)
@@ -235,6 +234,14 @@ defmodule Agentix.Agent do
 
   ## State: streaming — forward deltas, finalize on completion
 
+  def streaming({:call, from}, {:model_call_started, ref, started}, %Data{turn: %{ref: ref}} = data) do
+    {:keep_state, put_in(data.turn.call_started_at, started), [{:reply, from, :ok}]}
+  end
+
+  def streaming({:call, from}, {:model_call_failed, ref, reason}, %Data{turn: %{ref: ref}} = data) do
+    {:keep_state, record_model_call(data, :error, nil, reason), [{:reply, from, :ok}]}
+  end
+
   def streaming(:info, {:stream_started, ref, cancel}, %Data{turn: %{ref: ref}} = data) do
     {:keep_state, put_in(data.turn.cancel, cancel)}
   end
@@ -256,10 +263,7 @@ defmodule Agentix.Agent do
         {:DOWN, ref, :process, _pid, reason},
         %Data{turn: %{monitor_ref: ref}} = data
       ) do
-    case reason do
-      :normal -> :keep_state_and_data
-      _ -> fail_turn(reason, data)
-    end
+    fail_turn(reason, data)
   end
 
   def streaming({:call, from}, {:send_message, _m, _s, _o}, _data) do
@@ -267,7 +271,7 @@ defmodule Agentix.Agent do
   end
 
   def streaming({:call, from}, :cancel, data) do
-    {data, actions} = abort_turn(data, from)
+    {data, actions} = abort_turn(data, from, true)
     {:next_state, :idle, data, actions}
   end
 
@@ -334,6 +338,11 @@ defmodule Agentix.Agent do
     do: handle_common(:awaiting_input, event_type, event, data)
 
   ## Shared handlers
+
+  defp handle_common(_state, {:call, from}, {tag, _ref, _value}, _data)
+       when tag in [:model_call_started, :model_call_failed] do
+    {:keep_state_and_data, [{:reply, from, {:error, :stale}}]}
+  end
 
   # Stale stream messages from a superseded/cancelled turn (ref no longer current)
   # are dropped. `:stream_done` is the only 4-tuple; the rest are 3-tuples.
@@ -497,7 +506,7 @@ defmodule Agentix.Agent do
         | task_pid: pid,
           monitor_ref: ref,
           context: context,
-          call_started_at: System.monotonic_time()
+          call_started_at: nil
       })
 
     Publisher.state_changed(data.publisher, :streaming)
@@ -584,7 +593,7 @@ defmodule Agentix.Agent do
     drop_monitor(turn)
     Logger.warning("agentix stream failed: #{inspect(reason)}")
 
-    data = record_model_call(data, :error, nil, describe_error(reason))
+    data = record_model_call(data, :error, nil, reason)
     data = record_partial(data, :error)
     # Provider/stream failures get their own terminal event, WITH the reason —
     # `cancelled` stays reserved for user-initiated cancellation, so a consumer
@@ -603,12 +612,13 @@ defmodule Agentix.Agent do
 
   # Cancel from any non-idle state: stop the streaming task, invoke the provider's
   # cancel closure so the socket actually closes, record the partial assistant turn.
-  defp abort_turn(data, from) do
+  defp abort_turn(data, from, streaming? \\ false) do
     turn = data.turn
 
+    stop_stream_task(turn, streaming?)
+    data = drain_call_outcome(data)
     drop_monitor(turn)
-    if turn.task_pid, do: Task.Supervisor.terminate_child(Agentix.TaskSupervisor, turn.task_pid)
-    if is_function(turn.cancel, 0), do: turn.cancel.()
+    if is_function(data.turn.cancel, 0), do: data.turn.cancel.()
 
     data = cancel_tool_calls(data)
     # Killing the streaming task means its telemetry span never closes, so this
@@ -626,6 +636,35 @@ defmodule Agentix.Agent do
     Persistence.put_fsm_state(data.conversation_id, fsm_state(:idle, data.last_seq))
     Publisher.state_changed(data.publisher, :idle)
     {%{data | turn: nil}, [{:reply, from, :ok}]}
+  end
+
+  defp stop_stream_task(turn, streaming?) do
+    if turn.task_pid, do: Task.Supervisor.terminate_child(Agentix.TaskSupervisor, turn.task_pid)
+
+    if streaming? and is_reference(turn.monitor_ref) do
+      receive do
+        {:DOWN, ref, :process, _pid, _reason} when ref == turn.monitor_ref -> :ok
+      end
+    end
+  end
+
+  # The task's DOWN follows its outcome messages. Keep an outcome already returned
+  # by the provider when cancellation reaches the agent first.
+  defp drain_call_outcome(%Data{turn: %{ref: ref, task_pid: pid}} = data) do
+    receive do
+      {:stream_started, ^ref, cancel} ->
+        drain_call_outcome(put_in(data.turn.cancel, cancel))
+
+      {:"$gen_call", {^pid, _tag} = from, {:model_call_failed, ^ref, reason}} ->
+        data = record_model_call(data, :error, nil, reason)
+        :gen_statem.reply(from, :ok)
+        data
+
+      {:stream_done, ^ref, _message, usage} ->
+        record_model_call(data, :ok, usage, nil)
+    after
+      0 -> data
+    end
   end
 
   # Persist whatever assistant text streamed so far as a (partial) assistant_msg, so
@@ -1135,9 +1174,15 @@ defmodule Agentix.Agent do
     span_meta = Map.put(env.meta, :attempt, attempt)
     started = System.monotonic_time()
 
-    :telemetry.span([:agentix, :model_call], span_meta, fn ->
-      open_and_consume_stream(env, span_meta, started)
-    end)
+    case :gen_statem.call(env.agent, {:model_call_started, env.turn_ref, started}) do
+      :ok ->
+        :telemetry.span([:agentix, :model_call], span_meta, fn ->
+          open_and_consume_stream(env, span_meta, started)
+        end)
+
+      {:error, :stale} ->
+        :ok
+    end
   rescue
     error in Telemetry.StreamOpenError -> handle_open_failure(env, attempt, error.reason)
   end
@@ -1179,6 +1224,13 @@ defmodule Agentix.Agent do
   # `attempt` is 1-based; `max_attempts` of 1 means a single try. A retried open
   # produces a fresh :model_call span with `attempt` incremented.
   defp handle_open_failure(env, attempt, reason) do
+    case :gen_statem.call(env.agent, {:model_call_failed, env.turn_ref, reason}) do
+      :ok -> retry_or_fail(env, attempt, reason)
+      {:error, :stale} -> :ok
+    end
+  end
+
+  defp retry_or_fail(env, attempt, reason) do
     if attempt < env.max_attempts and Agentix.Retry.retryable?(reason) do
       delay = Agentix.Retry.delay(attempt, env.policy, Agentix.Retry.retry_after_ms(reason))
 
@@ -1598,95 +1650,22 @@ defmodule Agentix.Agent do
     end
   end
 
-  ## Model-call records (see `model_call_log` in `Agentix.Conversation.Config`)
+  ## Model-call records
 
-  # Called from all three terminals of a provider call: completion, failure, and
-  # cancellation. A failed or cancelled call has no usage — the provider reports
-  # it only once the stream assembles — but it took time and may well have spent
-  # tokens, so the row exists and says so rather than the call vanishing.
-  #
-  # `call_started_at` is the guard against double-counting: it is set when the
-  # streaming task starts and cleared when the call ends, so a turn cancelled
-  # while running tools (its model call long since recorded) writes nothing here.
+  # Clear the active attempt after each outcome, including failures before retry.
   defp record_model_call(data, status, usage, error) do
-    level = model_call_log(data.config)
+    if data.turn && data.turn.call_started_at do
+      :ok =
+        ModelCall.record(data.conversation_id, data.config, data.turn.context, %{
+          started_at: data.turn.call_started_at,
+          status: status,
+          usage: usage,
+          error: error
+        })
 
-    if (level != :off and data.turn) && data.turn.call_started_at do
-      seq = data.model_call_seq + 1
-
-      Persistence.put_model_call(data.conversation_id, %{
-        turn_ref: seq,
-        rendered_context: rendered_context(level, data.turn.context),
-        model: data.config.model,
-        usage: usage || %{},
-        latency_ms: elapsed_ms(data.turn.call_started_at),
-        status: status,
-        error: error,
-        tenant_key: data.config.tenant_key,
-        feature: data.config.feature,
-        pricing_version: pricing_version()
-      })
-
-      %{data | model_call_seq: seq, turn: %{data.turn | call_started_at: nil}}
+      put_in(data.turn.call_started_at, nil)
     else
       data
-    end
-  end
-
-  # Chosen cap: long enough to identify a provider failure, short enough that a
-  # crash loop cannot fill the column with stacktraces.
-  @max_error_bytes 500
-
-  defp describe_error(reason) do
-    reason
-    |> inspect(printable_limit: @max_error_bytes)
-    |> String.slice(0, @max_error_bytes)
-  end
-
-  # `:records` deliberately stores no prompt: the point of that level is a small
-  # row per call that a host can keep indefinitely.
-  defp rendered_context(:full, context), do: encode_context(context)
-  defp rendered_context(_level, _context), do: nil
-
-  # A conversation can raise the level above the application default but not
-  # below it, which is how `audit?` behaved before it: the host-wide setting is
-  # the floor. `:audit` is still honoured so an app configured before 0.5.0 keeps
-  # recording what it recorded.
-  defp model_call_log(%Config{model_call_log: level}) when level in [:records, :full], do: level
-
-  defp model_call_log(_config) do
-    case Application.get_env(:agentix, :model_call_log) do
-      level when level in [:off, :records, :full] ->
-        level
-
-      _unset ->
-        if Application.get_env(:agentix, :audit, false), do: :full, else: :off
-    end
-  end
-
-  defp elapsed_ms(started_at),
-    do: System.convert_time_unit(System.monotonic_time() - started_at, :native, :millisecond)
-
-  # The catalog that priced this call. ReqLLM computes cost against `llm_db`, a
-  # date-versioned price list, so the row records which version applied — a later
-  # price correction is then traceable instead of silently rewriting history.
-  defp pricing_version do
-    case Application.spec(:llm_db, :vsn) do
-      nil -> nil
-      vsn -> to_string(vsn)
-    end
-  end
-
-  # Restore the per-model-call counter on revival so rows keyed by `turn_ref` are
-  # appended after the pre-crash rows instead of overwriting them.
-  defp last_model_call_seq(conversation_id, config) do
-    if model_call_log(config) == :off do
-      0
-    else
-      conversation_id
-      |> Persistence.model_calls()
-      |> Enum.map(& &1.turn_ref)
-      |> Enum.max(fn -> 0 end)
     end
   end
 
@@ -1703,9 +1682,6 @@ defmodule Agentix.Agent do
   # and Ecto adapters round-trip identically through `Agentix.Codec`.
   defp message_content(%Message{} = message),
     do: %{"message" => Jason.decode!(Codec.encode!(message))}
-
-  defp encode_context(nil), do: %{}
-  defp encode_context(%Context{} = context), do: Jason.decode!(Codec.encode!(context))
 
   defp normalize_user_message(%Message{} = message), do: message
   defp normalize_user_message(text) when is_binary(text), do: Context.user(text)

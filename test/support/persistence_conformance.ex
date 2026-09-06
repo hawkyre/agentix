@@ -255,6 +255,63 @@ defmodule Agentix.PersistenceConformance do
         assert call.pricing_version == "2026.8.4"
       end
 
+      test "concurrent model calls receive distinct ascending references" do
+        conv = uid("conv")
+        models = ["summary", "retry", "response"]
+
+        tasks =
+          Enum.map(models, fn model ->
+            Task.async(fn -> @adapter.append_model_call(conv, %{model: model}) end)
+          end)
+
+        assert Enum.map(tasks, &Task.await/1) == Enum.map(models, fn _ -> :ok end)
+        calls = @adapter.model_calls(conv)
+        assert Enum.map(calls, & &1.turn_ref) == Enum.to_list(1..length(models))
+        assert Enum.sort(Enum.map(calls, & &1.model)) == Enum.sort(models)
+      end
+
+      test "allocated model-call references follow the greatest stored explicit reference" do
+        conv = uid("conv")
+        :ok = @adapter.put_model_call(conv, %{turn_ref: 8, model: "existing"})
+        :ok = @adapter.put_model_call(conv, %{turn_ref: 2, model: "earlier"})
+        :ok = @adapter.append_model_call(conv, %{turn_ref: 1, model: "summary"})
+
+        assert Enum.map(@adapter.model_calls(conv), & &1.turn_ref) == [2, 8, 9]
+      end
+
+      test "allocated model-call references are scoped to each conversation" do
+        a = uid("conv")
+        b = uid("conv")
+        :ok = @adapter.append_model_call(a, %{model: "first"})
+        :ok = @adapter.append_model_call(b, %{model: "independent"})
+        :ok = @adapter.append_model_call(a, %{model: "second"})
+
+        assert Enum.map(@adapter.model_calls(a), & &1.turn_ref) == [1, 2]
+        assert [%{turn_ref: 1, model: "independent"}] = @adapter.model_calls(b)
+      end
+
+      test "model-call allocation follows retained rows after garbage collection" do
+        conv = uid("conv")
+        old = DateTime.add(DateTime.utc_now(), -1, :day)
+        :ok = @adapter.put_model_call(conv, %{turn_ref: 1, inserted_at: old})
+        :ok = @adapter.append_model_call(conv, %{model: "retained"})
+        assert {:ok, 1} = @adapter.gc_model_calls(conv, to_timeout(hour: 1))
+        :ok = @adapter.append_model_call(conv, %{model: "next"})
+        assert Enum.map(@adapter.model_calls(conv), & &1.turn_ref) == [2, 3]
+
+        assert {:ok, 2} = @adapter.gc_model_calls(conv, 0)
+        :ok = @adapter.append_model_call(conv, %{model: "fresh"})
+        assert [%{turn_ref: 1, model: "fresh"}] = @adapter.model_calls(conv)
+      end
+
+      test "deleting a conversation resets model-call allocation" do
+        conv = uid("conv")
+        :ok = @adapter.append_model_call(conv, %{model: "first"})
+        :ok = @adapter.delete_conversation(conv)
+        :ok = @adapter.append_model_call(conv, %{model: "fresh"})
+        assert [%{turn_ref: 1, model: "fresh"}] = @adapter.model_calls(conv)
+      end
+
       test "delete_conversation removes the row, its events, and its model calls" do
         conv = uid("conv")
 
