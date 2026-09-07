@@ -7,6 +7,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-05
+
+### Fixed
+
+- Summary calls save returned usage and costs according to `model_call_log`.
+- Each retry attempt gets a call record. Failures without reported usage keep
+  an empty usage map. Call latency excludes retry delays.
+- Concurrent summary and conversation calls receive distinct record references.
+- Cancellation preserves queued provider outcomes and creates no extra call
+  record during retry delays.
+- A provider that exits without returning a response fails the turn.
+- The demo app applies the model-call schema upgrade before its tests run.
+- Phoenix dependencies use patched releases in the project and demo lockfiles.
+
+### Added
+
+- Optional `Agentix.Persistence.append_model_call/2` callback for atomic reference
+  allocation and insertion. Existing adapters use a compatibility fallback.
+  No database migration is required for this update.
+
+## [0.5.2] - 2026-09-03
+
+### Added
+
+- **`config :agentix, :addressing`** — `:local` (default, unchanged behaviour) or
+  `:global`. Under `:global`, a conversation resolves to the same agent from
+  every node in the cluster, through Erlang's `:global` registry.
+
+  This is a correctness fix for multi-node hosts, not a convenience. A
+  conversation is meant to have exactly one agent because that agent is the
+  single writer of its durable log. Under node-local addressing on two nodes,
+  each node's `ensure_started/2` finds nothing locally and starts its own, so two
+  agents interleave writes to one conversation. `cancel/1` had the mirror
+  problem: a turn running elsewhere was not found, and the call returned `:ok`
+  having cancelled nothing.
+
+  Under `:global` the second start loses with `{:error, {:already_started, pid}}`
+  — already handled — and every entry verb reaches the live agent wherever it
+  runs. The cost is that registration is a cluster-wide synchronous operation, so
+  starting a conversation gets slower as nodes are added; it suits coarse
+  conversations rather than one per request. A netsplit is out of its reach and
+  documented as such.
+
+- `Agentix.Addressing` — `mode/0`, `via/1`, `whereis/1`. The agent's internal
+  addressing delegates to it, so the `via` seam its docs always promised is real.
+
+### Documented
+
+- `Conversation.cancel/1` states what it already did: it returns only once the
+  streaming task is terminated, the provider's cancel closure has run, the
+  partial assistant message is persisted and the conversation is idle.
+
+## [0.5.1] - 2026-09-03
+
+### Fixed
+
+- `feature` now lands on the `agentix_conversations` **column**, not only inside
+  the settings blob. `init/1` wrote `tenant_key` and not `feature`, so the column
+  a host queries and joins on stayed null while the config that set it looked
+  correct. Model-call rows were unaffected — they take the feature straight from
+  the config.
+
+## [0.5.0] - 2026-09-03
+
+### Added
+
+- **`model_call_log`** — durable records of provider calls, replacing the
+  `audit?` boolean with three levels on `Agentix.Conversation.Config` (and as
+  application config): `:off` (the default, unchanged), `:records` (one row per
+  call carrying model, usage, latency, outcome, `tenant_key` and `feature`, with
+  **no** prompt), and `:full` (the same row plus `rendered_context`). The middle
+  level is the one that did not exist before: a row small enough to keep
+  indefinitely, which is what a host needs to answer "what did this tenant
+  spend" without also storing every prompt forever.
+- **Calls are recorded at every outcome, not only on success.** A failed call
+  writes a row with `status: :error` and the provider's reason; a cancelled turn
+  writes `status: :cancelled`. The cancelled case is only reachable here:
+  cancelling kills the streaming task, so its telemetry span emits no terminal
+  event at all and a handler counting spend from telemetry misses it silently.
+- **`feature`** — an optional label on `Agentix.Conversation.Config` for the part
+  of the host application a conversation serves. Stored on the conversation and
+  mirrored onto every model-call row, indexed as `(tenant_key, feature,
+  inserted_at)`, so spend by feature is one query with no join. Unlike
+  `tenant_key` it is a label, not an isolation boundary — nothing selects or
+  deletes by it.
+- `tenant_key` is now mirrored onto model-call rows too, so the rows stay
+  attributable after their conversation is deleted.
+- `pricing_version` on each row — the `llm_db` catalog version that costed the
+  call, so a later price correction is traceable rather than a silent rewrite.
+- `latency_ms` is now actually populated. The column existed since the audit
+  table was introduced and was never written.
+
+### Changed
+
+- `put_model_call/2` persists whatever it is given. Whether a call is recorded,
+  and at what detail, is the agent's decision — adapters no longer consult
+  application config themselves.
+- `gc_model_calls/2` is documented as offered-but-unscheduled, with the reason:
+  under `:full` the rows are the fastest-growing table in the schema, while under
+  `:records` they are usually the host's accounting record and expiring them
+  deletes it. Agentix will not pick for you.
+
+### Breaking
+
+- **`agentix_model_calls` gained columns and `rendered_context` became
+  nullable.** Hosts that ran `create_agentix_tables.exs` before 0.5.0 must apply
+  `priv/templates/migration/upgrade_agentix_model_calls.exs`; a fresh install
+  gets everything from the create migration and must not run it. The upgrade
+  backfills `tenant_key` from each row's surviving conversation.
+- `Config.audit?` is deprecated but still accepted and still means `:full`, at
+  both the conversation and application level, so conversations persisted before
+  this release revive with the recording they were configured for. It will be
+  removed in a later release.
+
 ## [0.4.0] - 2026-08-23
 
 ### Added
@@ -170,7 +284,11 @@ First public release.
 - Modern tooling: Credo, Dialyxir, Styler, ExCoveralls, MixAudit, ExDoc, and a
   `mix check` quality gate.
 
-[Unreleased]: https://github.com/hawkyre/agentix/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/hawkyre/agentix/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/hawkyre/agentix/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/hawkyre/agentix/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/hawkyre/agentix/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/hawkyre/agentix/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/hawkyre/agentix/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/hawkyre/agentix/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hawkyre/agentix/compare/v0.1.0...v0.2.0

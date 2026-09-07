@@ -1,3 +1,16 @@
+defmodule Agentix.CompactionFlowTest.FinalizeFailureProvider do
+  @moduledoc false
+  @behaviour Agentix.Provider
+
+  alias Agentix.Test.MockProvider
+
+  @impl true
+  def stream(model, context, opts) do
+    {:ok, stream} = MockProvider.stream(model, context, opts)
+    {:ok, %{stream | finalize: fn -> raise "summary finalization failed" end}}
+  end
+end
+
 defmodule Agentix.CompactionFlowTest do
   use ExUnit.Case, async: false
 
@@ -5,6 +18,7 @@ defmodule Agentix.CompactionFlowTest do
 
   alias Agentix.Codec
   alias Agentix.Compaction.Summarize
+  alias Agentix.CompactionFlowTest.FinalizeFailureProvider
   alias Agentix.Conversation
   alias Agentix.Conversation.Config
   alias Agentix.Event
@@ -12,6 +26,7 @@ defmodule Agentix.CompactionFlowTest do
   alias Agentix.Persistence
   alias Agentix.Scope
   alias Agentix.Test.MockProvider
+  alias Agentix.Test.PausingProvider
   alias ReqLLM.Context
   alias ReqLLM.Message
   alias ReqLLM.Message.ContentPart
@@ -65,6 +80,152 @@ defmodule Agentix.CompactionFlowTest do
   end
 
   describe "Summarize.run/2 — prefix-ward cumulative summary row" do
+    @tag :accounting_regression
+    test "records the summary call and preserves its returned usage", %{id: id} do
+      seed_turn(id, "alpha", "resp1")
+      seed_turn(id, "bravo", "resp2")
+      seed_turn(id, "charlie", "resp3")
+
+      # Use the usage fixture from ModelCallLogTest, not a price estimate.
+      usage = %{input_tokens: 14, total_cost: 6.8e-5}
+      MockProvider.script(completion("SUMMARY-OF-EARLIER", usage: usage))
+
+      config =
+        Config.new(
+          model: "mock:test",
+          model_call_log: :records,
+          tenant_key: "tenant-metering",
+          feature: "extraction"
+        )
+
+      assert :ok = Summarize.run(id, config)
+      assert %{to_seq: 2, content: %{"message" => message}} = Persistence.latest_summary(id)
+
+      assert Enum.map_join(Codec.decode_message(message).content, "", & &1.text) ==
+               "SUMMARY-OF-EARLIER"
+
+      assert [_request] = MockProvider.requests()
+      assert [call] = Persistence.model_calls(id)
+      assert call.status == :ok
+      assert call.model == config.model
+      assert call.usage == usage
+      assert call.tenant_key == config.tenant_key
+      assert call.feature == config.feature
+      assert call.summary_version == summary_version(id)
+      assert call.rendered_context == nil
+      assert is_integer(call.latency_ms) and call.latency_ms >= 0
+    end
+
+    test "full logging stores the summary prompt", %{id: id} do
+      seed_summary_history(id)
+      MockProvider.script(completion("summary"))
+
+      assert :ok = Summarize.run(id, config(id, model_call_log: :full))
+
+      assert [request] = MockProvider.requests()
+      assert [call] = Persistence.model_calls(id)
+      assert call.rendered_context == Jason.decode!(Codec.encode!(request.context))
+    end
+
+    test "disabled logging stores the summary without a call record", %{id: id} do
+      seed_summary_history(id)
+      MockProvider.script(completion("summary"))
+
+      assert :ok = Summarize.run(id, config(id, model_call_log: :off))
+
+      assert Persistence.latest_summary(id)
+      assert Persistence.model_calls(id) == []
+    end
+
+    test "summary calls use the application logging default", %{id: id} do
+      previous = Application.get_env(:agentix, :model_call_log)
+      Application.put_env(:agentix, :model_call_log, :records)
+
+      on_exit(fn ->
+        if previous do
+          Application.put_env(:agentix, :model_call_log, previous)
+        else
+          Application.delete_env(:agentix, :model_call_log)
+        end
+      end)
+
+      seed_summary_history(id)
+      MockProvider.script(completion("summary"))
+
+      assert :ok = Summarize.run(id, config(id, []))
+
+      assert [%{status: :ok, rendered_context: nil}] = Persistence.model_calls(id)
+    end
+
+    test "a failed summary call records the error without reported usage", %{id: id} do
+      seed_summary_history(id)
+      MockProvider.script(error(503))
+
+      assert :ok = Summarize.run(id, config(id, model_call_log: :records))
+
+      assert Persistence.latest_summary(id) == nil
+      assert [call] = Persistence.model_calls(id)
+      assert call.status == :error
+      assert call.error =~ "503"
+      assert call.usage == %{}
+    end
+
+    test "summary finalization failure records one error", %{id: id} do
+      seed_summary_history(id)
+      MockProvider.script(completion("summary"))
+      Application.put_env(:agentix, :provider, FinalizeFailureProvider)
+      on_exit(fn -> Application.put_env(:agentix, :provider, MockProvider) end)
+
+      assert_raise RuntimeError, "summary finalization failed", fn ->
+        Summarize.run(id, config(id, model_call_log: :records))
+      end
+
+      assert Persistence.latest_summary(id) == nil
+      assert [call] = Persistence.model_calls(id)
+      assert call.status == :error
+      assert call.error =~ "summary finalization failed"
+      assert call.usage == %{}
+    end
+
+    test "a summary and a live call keep separate records", %{id: id} do
+      seed_summary_history(id)
+      Application.put_env(:agentix, :provider, PausingProvider)
+      Application.put_env(:agentix, :pausing_provider, %{text: "summary", test_pid: self()})
+
+      on_exit(fn ->
+        Application.delete_env(:agentix, :pausing_provider)
+        Application.put_env(:agentix, :provider, MockProvider)
+      end)
+
+      config = config(id, model_call_log: :records)
+      {:ok, _pid} = Conversation.ensure_started(id, config: config)
+      summary_task = Task.async(fn -> Summarize.run(id, config) end)
+      assert_receive {:agentix_streaming, summary_pid}
+
+      :ok = Conversation.send_message(id, "next", Scope.new())
+      assert_receive {:agentix_streaming, call_pid}
+
+      send(summary_pid, :agentix_release)
+      assert :ok = Task.await(summary_task)
+      send(call_pid, :agentix_release)
+      assert_receive {:turn_completed, _ref}
+
+      assert [summary_call, live_call] = Persistence.model_calls(id)
+      assert summary_call.summary_version == summary_version(id)
+      assert summary_call.status == :ok
+      assert live_call.status == :ok
+      assert summary_call.turn_ref < live_call.turn_ref
+    end
+
+    test "too few turns make no summary call or record", %{id: id} do
+      seed_turn(id, "alpha", "resp1")
+
+      assert :ok = Summarize.run(id, config(id, model_call_log: :records))
+
+      assert MockProvider.requests() == []
+      assert Persistence.model_calls(id) == []
+    end
+
     test "collapses the oldest turns into a summary, leaving the recent tail", %{id: id} do
       seed_turn(id, "alpha", "resp1")
       seed_turn(id, "bravo", "resp2")
@@ -172,6 +333,14 @@ defmodule Agentix.CompactionFlowTest do
   end
 
   defp system_prefix(messages), do: Enum.take_while(messages, &(&1.role == :system))
+
+  defp seed_summary_history(id) do
+    seed_turn(id, "alpha", "resp1")
+    seed_turn(id, "bravo", "resp2")
+    seed_turn(id, "charlie", "resp3")
+  end
+
+  defp summary_version(id), do: Persistence.latest_summary(id).version
 
   defp config(_id, opts), do: Config.new(Keyword.merge([model: "mock:test"], opts))
   defp pad, do: String.duplicate("x", 48)

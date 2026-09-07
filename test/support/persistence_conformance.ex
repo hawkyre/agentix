@@ -12,8 +12,8 @@ defmodule Agentix.PersistenceConformance do
   Lives in `test/support` (not `lib/`) so the ExUnit-dependent scaffold never ships
   in the released package. The using module may add its own `setup` (e.g. the Ecto
   sandbox); this suite only relies on the public behaviour and uses a fresh
-  conversation id per test for isolation. It must run `async: false` — the audit
-  test mutates the global `:agentix, :audit` env.
+  conversation id per test for isolation. It runs `async: false` — some cases
+  mutate global application env.
   """
 
   # A shared ExUnit suite is, by construction, one long quote in `__using__` — the
@@ -214,52 +214,130 @@ defmodule Agentix.PersistenceConformance do
         assert @adapter.get_tool_call(tcid).status == :pending
       end
 
-      test "model_calls are not stored when audit is off" do
+      # Adapters persist what they are handed; whether a call is recorded at all
+      # is the agent's decision from `model_call_log`, not the adapter's.
+      test "model_calls are stored as given, and gc removes them" do
         conv = uid("conv")
-        :ok = @adapter.put_model_call(conv, %{turn_ref: 1, rendered_context: %{}})
+
+        :ok = @adapter.put_model_call(conv, %{turn_ref: 1, rendered_context: %{"a" => 1}})
+        assert [%{turn_ref: 1}] = @adapter.model_calls(conv)
+        assert {:ok, 1} = @adapter.gc_model_calls(conv, 0)
         assert @adapter.model_calls(conv) == []
       end
 
-      test "model_calls are stored when audit is on, and gc removes them" do
+      test "a model_call round-trips every recorded field" do
         conv = uid("conv")
+        tenant = uid("tenant")
 
-        Application.put_env(:agentix, :audit, true)
+        :ok =
+          @adapter.put_model_call(conv, %{
+            turn_ref: 1,
+            rendered_context: nil,
+            model: "anthropic:claude-sonnet-5",
+            usage: %{"input_tokens" => 14, "total_cost" => 6.8e-5},
+            latency_ms: 940,
+            status: :error,
+            error: "provider stream open failed",
+            tenant_key: tenant,
+            feature: "extraction",
+            pricing_version: "2026.8.4"
+          })
 
-        try do
-          :ok = @adapter.put_model_call(conv, %{turn_ref: 1, rendered_context: %{"a" => 1}})
-          assert [%{turn_ref: 1}] = @adapter.model_calls(conv)
-          assert {:ok, 1} = @adapter.gc_model_calls(conv, 0)
-          assert @adapter.model_calls(conv) == []
-        after
-          Application.delete_env(:agentix, :audit)
-        end
+        assert [call] = @adapter.model_calls(conv)
+        assert call.rendered_context == nil
+        assert call.model == "anthropic:claude-sonnet-5"
+        assert call.usage["total_cost"] == 6.8e-5
+        assert call.latency_ms == 940
+        assert call.status == :error
+        assert call.error == "provider stream open failed"
+        assert call.tenant_key == tenant
+        assert call.feature == "extraction"
+        assert call.pricing_version == "2026.8.4"
       end
 
-      test "delete_conversation removes the row, its events, and its audit rows" do
+      test "concurrent model calls receive distinct ascending references" do
+        conv = uid("conv")
+        models = ["summary", "retry", "response"]
+
+        tasks =
+          Enum.map(models, fn model ->
+            Task.async(fn -> @adapter.append_model_call(conv, %{model: model}) end)
+          end)
+
+        assert Enum.map(tasks, &Task.await/1) == Enum.map(models, fn _ -> :ok end)
+        calls = @adapter.model_calls(conv)
+        assert Enum.map(calls, & &1.turn_ref) == Enum.to_list(1..length(models))
+        assert Enum.sort(Enum.map(calls, & &1.model)) == Enum.sort(models)
+      end
+
+      test "allocated model-call references follow the greatest stored explicit reference" do
+        conv = uid("conv")
+        :ok = @adapter.put_model_call(conv, %{turn_ref: 8, model: "existing"})
+        :ok = @adapter.put_model_call(conv, %{turn_ref: 2, model: "earlier"})
+        :ok = @adapter.append_model_call(conv, %{turn_ref: 1, model: "summary"})
+
+        assert Enum.map(@adapter.model_calls(conv), & &1.turn_ref) == [2, 8, 9]
+      end
+
+      test "allocated model-call references are scoped to each conversation" do
+        a = uid("conv")
+        b = uid("conv")
+        :ok = @adapter.append_model_call(a, %{model: "first"})
+        :ok = @adapter.append_model_call(b, %{model: "independent"})
+        :ok = @adapter.append_model_call(a, %{model: "second"})
+
+        assert Enum.map(@adapter.model_calls(a), & &1.turn_ref) == [1, 2]
+        assert [%{turn_ref: 1, model: "independent"}] = @adapter.model_calls(b)
+      end
+
+      test "model-call allocation follows retained rows after garbage collection" do
+        conv = uid("conv")
+        old = DateTime.add(DateTime.utc_now(), -1, :day)
+        :ok = @adapter.put_model_call(conv, %{turn_ref: 1, inserted_at: old})
+        :ok = @adapter.append_model_call(conv, %{model: "retained"})
+        assert {:ok, 1} = @adapter.gc_model_calls(conv, to_timeout(hour: 1))
+        :ok = @adapter.append_model_call(conv, %{model: "next"})
+        assert Enum.map(@adapter.model_calls(conv), & &1.turn_ref) == [2, 3]
+
+        assert {:ok, 2} = @adapter.gc_model_calls(conv, 0)
+        :ok = @adapter.append_model_call(conv, %{model: "fresh"})
+        assert [%{turn_ref: 1, model: "fresh"}] = @adapter.model_calls(conv)
+      end
+
+      test "deleting a conversation resets model-call allocation" do
+        conv = uid("conv")
+        :ok = @adapter.append_model_call(conv, %{model: "first"})
+        :ok = @adapter.delete_conversation(conv)
+        :ok = @adapter.append_model_call(conv, %{model: "fresh"})
+        assert [%{turn_ref: 1, model: "fresh"}] = @adapter.model_calls(conv)
+      end
+
+      test "delete_conversation removes the row, its events, and its model calls" do
         conv = uid("conv")
 
-        Application.put_env(:agentix, :audit, true)
+        :ok = @adapter.put_conversation(conv, %{settings: %{"a" => 1}})
+        {:ok, _seq} = @adapter.append_event(conv, Event.new(:user_msg, %{n: 1}))
+        :ok = @adapter.put_model_call(conv, %{turn_ref: 1, rendered_context: %{}})
 
-        try do
-          :ok = @adapter.put_conversation(conv, %{settings: %{"a" => 1}})
-          {:ok, _seq} = @adapter.append_event(conv, Event.new(:user_msg, %{n: 1}))
-          :ok = @adapter.put_model_call(conv, %{turn_ref: 1, rendered_context: %{}})
+        :ok = @adapter.delete_conversation(conv)
 
-          :ok = @adapter.delete_conversation(conv)
+        assert @adapter.get_conversation(conv) == nil
+        assert @adapter.stream_events(conv) == []
+        assert @adapter.model_calls(conv) == []
 
-          assert @adapter.get_conversation(conv) == nil
-          assert @adapter.stream_events(conv) == []
-          assert @adapter.model_calls(conv) == []
+        # Idempotent: deleting an unknown/already-deleted id is still :ok.
+        assert @adapter.delete_conversation(conv) == :ok
 
-          # Idempotent: deleting an unknown/already-deleted id is still :ok.
-          assert @adapter.delete_conversation(conv) == :ok
+        # The seq counter reset with the conversation: a fresh append is seq 1.
+        {:ok, seq} = @adapter.append_event(conv, Event.new(:user_msg, %{n: 2}))
+        assert seq == 1
+      end
 
-          # The seq counter reset with the conversation: a fresh append is seq 1.
-          {:ok, seq} = @adapter.append_event(conv, Event.new(:user_msg, %{n: 2}))
-          assert seq == 1
-        after
-          Application.delete_env(:agentix, :audit)
-        end
+      test "feature round-trips through put_conversation/get_conversation" do
+        conv = uid("conv")
+
+        :ok = @adapter.put_conversation(conv, %{settings: %{}, feature: "interview"})
+        assert @adapter.get_conversation(conv).feature == "interview"
       end
 
       test "tenant_key round-trips through put_conversation/get_conversation" do

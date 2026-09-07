@@ -19,6 +19,7 @@ defmodule Agentix.Repo.Migrations.CreateAgentixTables do
       add(:fsm_state, :map, null: false, default: %{})
       add(:status, :text, null: false, default: "active")
       add(:tenant_key, :text)
+      add(:feature, :text)
       timestamps(type: :utc_datetime_usec)
     end
 
@@ -110,10 +111,19 @@ defmodule Agentix.Repo.Migrations.CreateAgentixTables do
       )
 
       add(:turn_ref, :bigint, null: false)
-      add(:rendered_context, :map, null: false)
+      # Null under `model_call_log: :records` — that level stores the call, not
+      # the prompt. Only `:full` fills it.
+      add(:rendered_context, :map)
       add(:model, :text)
       add(:usage, :map)
       add(:latency_ms, :integer)
+      add(:status, :text, null: false, default: "ok")
+      add(:error, :text)
+      # Mirrored from the conversation so spend reads need no join, and survive
+      # the conversation being deleted.
+      add(:tenant_key, :text)
+      add(:feature, :text)
+      add(:pricing_version, :text)
       add(:summary_version, :text)
       add(:evictions, {:array, :map})
       add(:inserted_at, :utc_datetime_usec, null: false)
@@ -121,5 +131,14 @@ defmodule Agentix.Repo.Migrations.CreateAgentixTables do
 
     create(index(:agentix_model_calls, [:conversation_id, :turn_ref]))
     create(index(:agentix_model_calls, [:inserted_at]))
+
+    # "What did this tenant spend, by feature, over this period" — one index.
+    create(index(:agentix_model_calls, [:tenant_key, :feature, :inserted_at]))
+
+    create(
+      constraint(:agentix_model_calls, :agentix_model_calls_status,
+        check: "status IN ('ok','error','cancelled')"
+      )
+    )
   end
 end

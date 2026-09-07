@@ -55,14 +55,19 @@ tool_calls                      -- so HITL suspensions survive a kill
   result          jsonb
   inserted_at / resolved_at
 
-model_calls                     -- OPTIONAL audit, off by default (see below)
+model_calls                     -- OPTIONAL, off by default (see below)
   id              uuid pk
   conversation_id uuid fk
   turn_ref        bigint
-  rendered_context jsonb        -- exactly what was sent to the model
+  rendered_context jsonb        -- exactly what was sent to the model (:full only)
   model           text
-  usage           jsonb
+  usage           jsonb         -- tokens and cost, as the provider reported them
   latency_ms      integer
+  status          text          -- ok | error | cancelled
+  error           text
+  tenant_key      text          -- mirrored from the conversation
+  feature         text          -- mirrored from the conversation
+  pricing_version text          -- the llm_db version that costed this call
   summary_version text          -- which compaction summary applied
   evictions       jsonb         -- what was stubbed/evicted this turn
   inserted_at
@@ -177,13 +182,19 @@ compaction and snapshotting — no separate snapshot table or cadence to tune.
 
 ## Resolved: `model_calls` GC
 
-TTL-based, configurable, **off by default.** It is the fastest-growing, least-
-permanent table and exists only for debugging/evals, so a simple time-based drop (or
-a per-conversation row cap) is enough. Since the audit table itself is off by default
-(below), there is usually nothing to GC; when it is switched on for an eval run, the
-TTL keeps it from growing without bound.
+`gc_model_calls/2` is offered, scheduled by nobody. Which retention is right
+depends on why the host turned recording on, and the two answers are opposite:
+under `:full` the rows carry whole prompts and are the fastest-growing table in
+the schema, so an eval run wants a short TTL. Under `:records` they are small,
+bounded by call volume, and are usually the host's cost record — expiring those
+silently deletes accounting. Agentix will not guess; a host that wants rows to
+expire schedules the call itself.
 
 ## Open questions
 
-- Multi-node persistence story (follows the addressing question in `01`; out of
-  scope for v0).
+- Multi-node writes under a netsplit. `config :agentix, addressing: :global`
+  makes a conversation resolve to one agent cluster-wide, which is what keeps a
+  single writer on the log. A partition defeats it: both sides register an agent
+  and both write, and `:global` resolves the duplicate name on heal by killing
+  one — after the fact. Reconciling those writes is a log-level question, not a
+  registry one.

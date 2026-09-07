@@ -4,6 +4,7 @@ defmodule Agentix.Compaction.Summarize do
 
   alias Agentix.Codec
   alias Agentix.Event
+  alias Agentix.ModelCall
   alias Agentix.Persistence
   alias Agentix.Provider
   alias ReqLLM.Context
@@ -65,7 +66,7 @@ defmodule Agentix.Compaction.Summarize do
   defp write_summary(conversation_id, config, prev_summary, events, to_seq) do
     body = [prior_text(prev_summary) | Enum.map(events, &event_text/1)]
 
-    case generate(Enum.join(body, "\n"), config) do
+    case generate(conversation_id, Enum.join(body, "\n"), config) do
       nil ->
         :ok
 
@@ -83,18 +84,58 @@ defmodule Agentix.Compaction.Summarize do
     end
   end
 
-  defp generate(body, config) do
+  defp generate(conversation_id, body, config) do
     context = Context.new([Context.system(@instruction), Context.user(body)])
+    outcome = %{started_at: System.monotonic_time(), summary_version: @version}
 
+    case consume_summary(context, config) do
+      {:ok, message, usage} ->
+        :ok =
+          ModelCall.record(
+            conversation_id,
+            config,
+            context,
+            Map.merge(outcome, %{status: :ok, usage: usage})
+          )
+
+        message_text(message)
+
+      {:error, reason} ->
+        :ok =
+          ModelCall.record(
+            conversation_id,
+            config,
+            context,
+            Map.merge(outcome, %{status: :error, error: reason})
+          )
+
+        nil
+
+      {:exception, kind, reason, stacktrace} ->
+        :ok =
+          ModelCall.record(
+            conversation_id,
+            config,
+            context,
+            Map.merge(outcome, %{status: :error, error: reason})
+          )
+
+        :erlang.raise(kind, reason, stacktrace)
+    end
+  end
+
+  defp consume_summary(context, config) do
     case Provider.stream(config.model, context, []) do
       {:ok, stream} ->
         Enum.each(stream.chunks, fn _chunk -> :ok end)
-        {message, _usage} = stream.finalize.()
-        message_text(message)
+        {message, usage} = stream.finalize.()
+        {:ok, message, usage}
 
-      {:error, _reason} ->
-        nil
+      {:error, _reason} = error ->
+        error
     end
+  catch
+    kind, reason -> {:exception, kind, reason, __STACKTRACE__}
   end
 
   defp prior_text(nil), do: ""
