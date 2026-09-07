@@ -51,10 +51,14 @@ defmodule AgentixDemoWeb.ChatLiveTest do
     ])
 
     {:ok, live, _html} = live(conn, "/c/" <> id)
-    live |> form("form[phx-submit='send']", %{"text" => "where is the Hook module?"}) |> render_submit()
+
+    live
+    |> form("form[phx-submit='send']", %{"text" => "where is the Hook module?"})
+    |> render_submit()
 
     assert_receive {:turn_completed, _ref}, 2_000
     html = render_until(live, "Found it in the Hook module.")
+
     # The real search_code callback ran against the repo — its file:line result is in the inspector.
     assert html =~ "lib/agentix/hook.ex"
     assert html =~ "<details"
@@ -132,5 +136,29 @@ defmodule AgentixDemoWeb.ChatLiveTest do
 
   test "visiting / redirects to a canonical /c/:id conversation URL", %{conn: conn} do
     assert {:error, {:live_redirect, %{to: "/c/" <> _id}}} = live(conn, "/")
+  end
+
+  test "records usage without storing the prompt", %{id: id, conn: conn} do
+    previous = Application.fetch_env(:agentix, :model_call_log)
+    Application.put_env(:agentix, :model_call_log, :records)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, level} -> Application.put_env(:agentix, :model_call_log, level)
+        :error -> Application.delete_env(:agentix, :model_call_log)
+      end
+    end)
+
+    usage = %{input_tokens: 14, total_cost: 6.8e-5}
+    MockProvider.script(completion("Recorded.", usage: usage))
+
+    {:ok, live, _html} = live(conn, "/c/" <> id)
+    live |> form("form[phx-submit='send']", %{"text" => "hello"}) |> render_submit()
+    assert_receive {:turn_completed, _ref}, 2_000
+
+    assert [call] = Agentix.Persistence.model_calls(id)
+    assert call.status == :ok
+    assert call.rendered_context == nil
+    assert call.usage == %{"input_tokens" => 14, "total_cost" => 6.8e-5}
   end
 end

@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cancellation preserves queued provider outcomes and creates no extra call
   record during retry delays.
 - A provider that exits without returning a response fails the turn.
+- The demo app applies the model-call schema upgrade before its tests run.
+- Phoenix dependencies use patched releases in the project and demo lockfiles.
 
 ### Added
 
