@@ -200,7 +200,7 @@ defmodule Agentix.Agent do
   # was lost), so we re-launch the turn without re-appending it. A per-turn `:schema`
   # override is not persisted, so recovery falls back to the config default (`[]` opts).
   def idle(:internal, {:rerun, scope}, data) do
-    launch_turn(scope, [], data, nil)
+    launch_turn(scope, recover_features(data), data, nil)
   end
 
   def idle(event_type, event, data), do: handle_common(:idle, event_type, event, data)
@@ -214,7 +214,12 @@ defmodule Agentix.Agent do
     # and may halt the turn before any model call. Injections land at the context tail.
     case run_pre_hooks(data, base) do
       {:cont, %Turn{} = turn} ->
-        launch_stream(data, apply_injections(turn.context, turn.injections))
+        feature = if data.turn.feature_frozen, do: data.turn.feature, else: turn.feature
+
+        launch_stream(
+          put_in(data.turn.feature, feature),
+          apply_injections(turn.context, turn.injections)
+        )
 
       {:halt, reason} ->
         halt_turn(data, reason)
@@ -407,13 +412,24 @@ defmodule Agentix.Agent do
   # A fresh user message: append it to the log, then launch the turn. The turn
   # assembles its context by reading the log, so the message is not threaded further.
   defp start_turn(message, scope, turn_opts, data, from) do
-    {:ok, seq} = append_event(data, :user_msg, message_content(normalize_user_message(message)))
+    feature = Keyword.get(turn_opts, :feature, data.config.feature)
+    content = Map.put(message_content(normalize_user_message(message)), "feature", feature)
+    {:ok, seq} = append_event(data, :user_msg, content)
     launch_turn(scope, turn_opts, %{data | last_seq: seq}, from)
   end
 
   defp launch_turn(scope, turn_opts, data, from) do
     schema = effective_schema(turn_opts, data.config)
-    data = %{data | turn: base_turn(scope, schema)}
+    feature = Keyword.get(turn_opts, :feature, data.config.feature)
+    turn = base_turn(scope, schema, feature)
+
+    turn = %{
+      turn
+      | feature: Keyword.get(turn_opts, :call_feature, feature),
+        feature_frozen: Keyword.get(turn_opts, :feature_frozen, false)
+    }
+
+    data = %{data | turn: turn}
     Publisher.turn_started(data.publisher, data.turn.ref)
     Publisher.state_changed(data.publisher, :preparing)
 
@@ -434,11 +450,14 @@ defmodule Agentix.Agent do
   # A fresh turn's in-memory state. `ref` keys this turn's tool tasks/events; `calls` and
   # `task_index` track in-flight tool calls. (`continue_turn/1` keeps the same `ref` for a
   # tool loop; `revive_awaiting/2` rebuilds this with a restored `calls` map.)
-  defp base_turn(scope, schema) do
+  defp base_turn(scope, schema, feature) do
     %{
       ref: make_ref(),
       msg_id: new_msg_id(),
       scope: scope,
+      turn_feature: feature,
+      feature: feature,
+      feature_frozen: false,
       # Effective output schema for this turn (nil = plain text). When set, the turn is
       # terminal (structured output is the answer — no tool loop) and the schema is passed
       # to the provider via `stream_opts/2`.
@@ -467,6 +486,8 @@ defmodule Agentix.Agent do
   # streaming. Split from `preparing` so the pre-hook pipeline sits cleanly before it.
   defp launch_stream(data, context) do
     turn = data.turn
+    Config.validate_feature!(turn.feature)
+    Persistence.put_fsm_state(data.conversation_id, feature_snapshot(data, :idle))
     agent = self()
     model = data.config.model
     # Tools are handed to the provider for schema/serialization; the loop dispatches
@@ -485,7 +506,8 @@ defmodule Agentix.Agent do
     telemetry_meta = %{
       conversation_id: data.conversation_id,
       system_call?: turn.scope.system?,
-      tenant_key: data.config.tenant_key
+      tenant_key: data.config.tenant_key,
+      feature: turn.feature
     }
 
     %{pid: pid, ref: ref} =
@@ -935,7 +957,10 @@ defmodule Agentix.Agent do
     # to it) but gets a fresh `msg_id` and zeroed accumulators. Derived from `base_turn/2`
     # so any new turn field stays in sync automatically; the schema carries over (nil in
     # practice — a schema turn is terminal and never reaches a tool-result continuation).
-    turn = %{base_turn(data.turn.scope, data.turn.schema) | ref: data.turn.ref}
+    turn = %{
+      base_turn(data.turn.scope, data.turn.schema, data.turn.turn_feature)
+      | ref: data.turn.ref
+    }
 
     Publisher.state_changed(data.publisher, :preparing)
     {:next_state, :preparing, %{data | turn: turn}, [{:next_event, :internal, :assemble}]}
@@ -944,11 +969,7 @@ defmodule Agentix.Agent do
   # The persisted pending set may have changed even when staying in `:awaiting_input`,
   # so always re-persist it; only broadcast `:state_changed` on a real transition.
   defp enter_awaiting(data, from_state) do
-    Persistence.put_fsm_state(data.conversation_id, %{
-      state: :awaiting_input,
-      pending: pending_subset(data.turn.calls),
-      last_seq: data.last_seq
-    })
+    Persistence.put_fsm_state(data.conversation_id, feature_snapshot(data, :awaiting_input))
 
     if from_state != :awaiting_input, do: Publisher.state_changed(data.publisher, :awaiting_input)
     {:next_state, :awaiting_input, data}
@@ -1077,7 +1098,12 @@ defmodule Agentix.Agent do
   defp pending_view(_turn), do: %{}
 
   defp build_turn(data, scope) do
-    Turn.new(context: data.turn.context, turn_ref: data.turn.ref, scope: scope)
+    Turn.new(
+      context: data.turn.context,
+      turn_ref: data.turn.ref,
+      scope: scope,
+      feature: data.turn.feature
+    )
   end
 
   defp find_tool(%Config{tools: tools}, name), do: Enum.find(tools, &(&1.name == name))
@@ -1280,7 +1306,15 @@ defmodule Agentix.Agent do
   defp run_pre_hooks(data, base) do
     config = data.config
     turn = build_hook_turn(data, base)
-    Pipeline.run_pre(turn, pre_hooks(config), config.injection_reserve, config.hook_timeout)
+
+    case Pipeline.run_pre(turn, pre_hooks(config), config.injection_reserve, config.hook_timeout) do
+      {:cont, turn} ->
+        Config.validate_feature!(turn.feature)
+        {:cont, turn}
+
+      halted ->
+        halted
+    end
   rescue
     e in OverflowError ->
       Logger.error("agentix pre-hook injection overflow: " <> Exception.message(e))
@@ -1309,6 +1343,7 @@ defmodule Agentix.Agent do
       context: context,
       user_message: last_user_message(context),
       turn_ref: data.turn.ref,
+      feature: data.turn.feature,
       scope: data.turn.scope
     )
   end
@@ -1318,6 +1353,7 @@ defmodule Agentix.Agent do
       context: data.turn.context,
       assistant_message: message,
       turn_ref: data.turn.ref,
+      feature: data.turn.feature,
       scope: data.turn.scope
     )
   end
@@ -1590,7 +1626,9 @@ defmodule Agentix.Agent do
     cached = fsm_pending(data.conversation_id)
     # Set the turn first so `arm_timeout/2` can key the re-armed timer on its `ref`.
     # A revived awaiting turn is a tool-loop continuation, so it carries no schema.
-    data = %{data | turn: base_turn(Scope.system(), nil)}
+    features = recover_features(data)
+    turn = base_turn(Scope.system(), nil, Keyword.fetch!(features, :feature))
+    data = %{data | turn: %{turn | feature: Keyword.fetch!(features, :call_feature)}}
 
     calls =
       Map.new(pending, fn call ->
@@ -1656,12 +1694,17 @@ defmodule Agentix.Agent do
   defp record_model_call(data, status, usage, error) do
     if data.turn && data.turn.call_started_at do
       :ok =
-        ModelCall.record(data.conversation_id, data.config, data.turn.context, %{
-          started_at: data.turn.call_started_at,
-          status: status,
-          usage: usage,
-          error: error
-        })
+        ModelCall.record(
+          data.conversation_id,
+          %{data.config | feature: data.turn.feature},
+          data.turn.context,
+          %{
+            started_at: data.turn.call_started_at,
+            status: status,
+            usage: usage,
+            error: error
+          }
+        )
 
       put_in(data.turn.call_started_at, nil)
     else
@@ -1692,6 +1735,36 @@ defmodule Agentix.Agent do
   defp new_msg_id, do: "msg_" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
 
   defp fsm_state(state, last_seq), do: %{state: state, pending: %{}, last_seq: last_seq}
+
+  defp feature_snapshot(data, state) do
+    %{
+      state: state,
+      pending: pending_subset(data.turn.calls),
+      last_seq: data.last_seq,
+      feature: data.turn.feature,
+      turn_feature: data.turn.turn_feature
+    }
+  end
+
+  defp recover_features(data) do
+    {_summary, events} = Persistence.load_since(data.conversation_id)
+    user = Enum.find(Enum.reverse(events), &(&1.type == :user_msg))
+
+    feature =
+      if user, do: Map.get(user.content, "feature", data.config.feature), else: data.config.feature
+
+    %{fsm_state: cached} = Persistence.get_conversation(data.conversation_id)
+
+    if Map.has_key?(cached, :feature) && is_integer(cached[:last_seq]) &&
+         (is_nil(user) || cached.last_seq >= user.seq) do
+      turn_feature = Map.get(cached, :turn_feature, feature)
+      frozen = cached.last_seq == data.last_seq
+      call_feature = if frozen, do: cached.feature, else: turn_feature
+      [feature: turn_feature, call_feature: call_feature, feature_frozen: frozen]
+    else
+      [feature: feature, call_feature: feature]
+    end
+  end
 
   defp max_seq(summary, events) do
     event_max = events |> Enum.map(& &1.seq) |> Enum.max(fn -> 0 end)

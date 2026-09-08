@@ -12,6 +12,7 @@ defmodule Agentix.Conversation do
   """
 
   alias Agentix.Agent
+  alias Agentix.Conversation.Config
   alias Agentix.Scope
   alias Agentix.TenantKey
 
@@ -77,6 +78,11 @@ defmodule Agentix.Conversation do
 
   Per-turn `opts`:
 
+    * `:feature` — the business purpose of calls in this turn. Overrides the
+      conversation default without changing its label. A sequential pre-hook can
+      use `Agentix.Hook.put_feature/2` to override one call. The next call returns
+      to this turn's default. This value survives recovery.
+
     * `:schema` — structured output for this turn only. A NimbleOptions keyword or a
       JSON Schema map makes the model return a conforming object (surfaced via
       `Agentix.object/1`); `false` opts out of the conversation's `response_format`
@@ -89,7 +95,7 @@ defmodule Agentix.Conversation do
   """
   @spec send_message(String.t(), message(), Scope.t(), keyword()) :: :ok | {:error, term()}
   def send_message(conversation_id, message, %Scope{} = scope, opts \\ []) do
-    turn_opts = Keyword.take(opts, [:schema])
+    turn_opts = Keyword.take(opts, [:schema, :feature])
     validate_turn_opts!(turn_opts)
     opts = default_tenant_from_scope(opts, scope)
 
@@ -111,6 +117,8 @@ defmodule Agentix.Conversation do
   # in `Config.new/2`; a per-turn override must meet the same bar, plus `false`/`nil` to opt
   # out). A bad value is a caller error, so raise here rather than crash deep in the provider.
   defp validate_turn_opts!(turn_opts) do
+    Config.validate_feature!(Keyword.get(turn_opts, :feature))
+
     case Keyword.fetch(turn_opts, :schema) do
       :error -> :ok
       {:ok, schema} -> validate_schema!(schema)

@@ -63,13 +63,16 @@ defmodule Agentix.Conversation.Config do
       the selector for `Agentix.Persistence.delete_by_tenant/1`. **Write-once**: it
       may be set while unset and re-passed with the same value, but a conflicting
       value makes `ensure_started/2` return `{:error, :tenant_key_conflict}`.
-    * `feature` — optional label for the part of the host application this
-      conversation serves (`nil` or a non-empty string). Persisted on the
-      conversation record and mirrored onto every model-call record, where it is
-      indexed alongside `tenant_key` — so "what did this tenant spend, by
-      feature" is one query with no join. Unlike `tenant_key` it is a label, not
-      an isolation boundary: nothing is selected or deleted by it, so re-passing
-      a different value simply relabels the conversation.
+    * `feature` — optional conversation label and default model-call purpose
+      (`nil` or a non-empty string). A turn's `:feature` option overrides the
+      default. A sequential pre-hook can select a different purpose for one call
+      with `Agentix.Hook.put_feature/2`. Each call stores its selected feature,
+      indexed alongside `tenant_key`. The label is not an isolation boundary.
+      Changing the config on revival changes the conversation default; passing
+      config to an already running conversation does not reconfigure it.
+    * `summary_feature` — the purpose of background summary calls. Defaults to
+      `"conversation_summary"`. Hosts can set a specific summary purpose.
+      Requires a non-empty string and does not inherit `feature`.
     * `notifier` / `pubsub` — wiring resolved at runtime; `nil` falls back to
       the application-level configuration.
 
@@ -99,6 +102,7 @@ defmodule Agentix.Conversation.Config do
           response_format: keyword() | map() | nil,
           tenant_key: String.t() | nil,
           feature: String.t() | nil,
+          summary_feature: String.t(),
           notifier: module() | nil,
           pubsub: atom() | nil
         }
@@ -138,6 +142,7 @@ defmodule Agentix.Conversation.Config do
     response_format: nil,
     tenant_key: nil,
     feature: nil,
+    summary_feature: "conversation_summary",
     notifier: nil,
     pubsub: nil
   ]
@@ -153,7 +158,7 @@ defmodule Agentix.Conversation.Config do
   @config_fields ~w(model system_prompt tools hooks stream_transformer api_key working_budget
                     injection_reserve tool_retention compaction_window default_timeout
                     hook_timeout audit? model_call_log retry response_format tenant_key feature
-                    notifier pubsub)a
+                    summary_feature notifier pubsub)a
   @field_strings Map.new(@config_fields, &{Atom.to_string(&1), &1})
 
   @spec new(keyword() | map()) :: t()
@@ -182,6 +187,8 @@ defmodule Agentix.Conversation.Config do
     validate_response_format!(config.response_format)
     Agentix.TenantKey.validate!(config.tenant_key)
     validate_feature!(config.feature)
+    validate_feature!(config.summary_feature)
+    if is_nil(config.summary_feature), do: raise(ArgumentError, "summary_feature must not be nil")
     config
   end
 
@@ -298,12 +305,17 @@ defmodule Agentix.Conversation.Config do
   # Same shape rule as `tenant_key` and the same cap, for the same reason: it is
   # written to an indexed column, and Postgres raises on an over-long index entry
   # at write time rather than here.
-  defp validate_feature!(nil), do: :ok
+  @doc false
+  @spec validate_feature!(String.t() | nil) :: :ok
+  def validate_feature!(nil), do: :ok
 
-  defp validate_feature!(feature)
-       when is_binary(feature) and feature != "" and byte_size(feature) <= 255, do: :ok
+  def validate_feature!(feature)
+      when is_binary(feature) and feature != "" and byte_size(feature) <= 255 do
+    if String.trim(feature) == "", do: raise(ArgumentError, "feature must not be blank")
+    :ok
+  end
 
-  defp validate_feature!(other) do
+  def validate_feature!(other) do
     raise ArgumentError,
           "feature must be nil or a 1..255-byte string, got: #{inspect(other)}"
   end

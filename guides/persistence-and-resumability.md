@@ -104,26 +104,27 @@ The persisted snapshot is deliberately small (the canonical definition lives in
 fsm_state = %{
   state:    :idle | :awaiting_input,   # only ever persisted in these two
   pending:  %{tool_call_id => %{executor, kind, prompt}},
-  last_seq: N                          # log position the working set was built from
+  last_seq: N,                         # log position at the snapshot
+  turn_feature: "answer",             # turn default, while a turn is in progress
+  feature: "view_generation"          # selected call purpose
 }
 ```
 
-`last_seq` is what lets revival read "latest summary + events since that summary's
-span" instead of replaying from zero (see snapshot cadence below). This one shape is
-the join between the resolver (`03`), the kill/resume path, and the schema. And
-because `suspension`/`resolution` are canonical event types, `fsm_state` is strictly
-a **cache over the log** — rebuildable, never authoritative; on disagreement the log
-wins (canonical statement in `01`).
+The event log and pending tool records determine recovery behavior. The feature
+fields retain execution metadata: a pre-hook's choice cannot always be rebuilt
+from messages. Agentix saves them before provider dispatch and while suspended.
+Each user event also stores its turn feature. A newer user event supersedes an
+older feature snapshot. Completed turns clear the feature snapshot.
 
 Safe-to-suspend states: `idle` and `awaiting_input` are clean to snapshot and
 evict. `streaming` and mid-`:server`-tool are not — there is no persisted
 `streaming` or `executing_tools`. A kill in those states is **not** frozen and
 resumed; recovery is from the log, and the two dangling shapes differ: a log ending
 in a `user_msg` re-runs the LLM turn (safe — no side effects yet); a log ending in a
-`tool_call` with no `tool_result` **re-dispatches that exact call with the same
-`tool_call_id`** — never re-rolls the LLM, which would mint new ids and duplicate
-side effects (canonical statement in `01`). Idempotency on `tool_call_id` also
-covers the kill → revive → late-answer race.
+`tool_call` with no `tool_result` receives its stored terminal result, if one
+exists, or an interrupted error. Agentix does not re-execute an interrupted
+server tool. The host must make side effects idempotent and decide whether a new
+operation can retry them.
 
 ## Timeout machinery
 

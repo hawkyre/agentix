@@ -72,9 +72,13 @@ defmodule Agentix.Persistence.EctoAccountingTest do
 
     assert Enum.all?(calls, fn call ->
              call.status == :ok and call.tenant_key == config.tenant_key and
-               call.feature == config.feature and call.model == config.model and
+               call.model == config.model and
                call.rendered_context == nil
            end)
+
+    assert Enum.map(calls, & &1.feature) ==
+             List.duplicate(config.feature, length(questions)) ++
+               [config.summary_feature, config.feature]
 
     assert length(MockProvider.requests()) == length(calls)
   end

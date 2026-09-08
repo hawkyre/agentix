@@ -85,6 +85,7 @@ defmodule Agentix.Compaction.Summarize do
   end
 
   defp generate(conversation_id, body, config) do
+    config = %{config | feature: config.summary_feature}
     context = Context.new([Context.system(@instruction), Context.user(body)])
     outcome = %{started_at: System.monotonic_time(), summary_version: @version}
 

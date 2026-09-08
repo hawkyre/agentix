@@ -136,6 +136,7 @@ defmodule Agentix.MixProject do
         "guides/persistence-and-resumability.md",
         "guides/reliability-and-structured-output.md",
         "guides/telemetry.md",
+        "guides/call-features.md",
         "guides/compaction.md",
         "guides/rendering.md",
         "guides/memory-and-sizing.md",

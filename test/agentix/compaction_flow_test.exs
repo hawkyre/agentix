@@ -95,7 +95,8 @@ defmodule Agentix.CompactionFlowTest do
           model: "mock:test",
           model_call_log: :records,
           tenant_key: "tenant-metering",
-          feature: "extraction"
+          feature: "extraction",
+          summary_feature: "interview_summary"
         )
 
       assert :ok = Summarize.run(id, config)
@@ -110,7 +111,7 @@ defmodule Agentix.CompactionFlowTest do
       assert call.model == config.model
       assert call.usage == usage
       assert call.tenant_key == config.tenant_key
-      assert call.feature == config.feature
+      assert call.feature == config.summary_feature
       assert call.summary_version == summary_version(id)
       assert call.rendered_context == nil
       assert is_integer(call.latency_ms) and call.latency_ms >= 0

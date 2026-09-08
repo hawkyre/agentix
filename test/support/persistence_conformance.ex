@@ -340,6 +340,24 @@ defmodule Agentix.PersistenceConformance do
         assert @adapter.get_conversation(conv).feature == "interview"
       end
 
+      test "call and turn features round-trip in recovery state, including explicit nil" do
+        conv = uid("conv")
+        @adapter.put_conversation(conv, %{settings: %{}})
+
+        for feature <- ["view_generation", nil] do
+          snapshot = %{
+            state: :idle,
+            pending: %{},
+            last_seq: 1,
+            feature: feature,
+            turn_feature: "answer"
+          }
+
+          assert :ok = @adapter.put_fsm_state(conv, snapshot)
+          assert @adapter.get_conversation(conv).fsm_state == snapshot
+        end
+      end
+
       test "tenant_key round-trips through put_conversation/get_conversation" do
         conv = uid("conv")
         tenant = uid("tenant")

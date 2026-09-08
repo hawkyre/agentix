@@ -491,14 +491,23 @@ if Code.ensure_loaded?(Ecto) do
     # `fsm_state` is the `%{state, pending, last_seq}` cache. `state` and each pending
     # entry's `executor`/`kind` are atoms; pending is keyed by tool_call_id (strings).
     defp decode_fsm_state(map) when is_map(map) and map_size(map) > 0 do
-      %{
+      decoded = %{
         state: atomize(map["state"] || map[:state]),
         pending: decode_pending(map["pending"] || map[:pending] || %{}),
         last_seq: map["last_seq"] || map[:last_seq]
       }
+
+      Enum.reduce([:feature, :turn_feature], decoded, &decode_feature(map, &1, &2))
     end
 
     defp decode_fsm_state(_), do: %{}
+
+    defp decode_feature(map, key, decoded) do
+      case Map.fetch(map, Atom.to_string(key)) do
+        {:ok, value} -> Map.put(decoded, key, value)
+        :error -> if Map.has_key?(map, key), do: Map.put(decoded, key, map[key]), else: decoded
+      end
+    end
 
     defp decode_pending(pending) when is_map(pending),
       do: Map.new(pending, fn {tcid, entry} -> {tcid, decode_pending_entry(entry)} end)

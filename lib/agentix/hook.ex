@@ -48,6 +48,7 @@ defmodule Agentix.Hook do
   external content as a prompt-injection surface.
   """
 
+  alias Agentix.Conversation.Config
   alias Agentix.Turn
   alias ReqLLM.Message.ContentPart
 
@@ -108,6 +109,20 @@ defmodule Agentix.Hook do
   @spec post(term(), (Turn.t() -> sequential_result()), keyword()) :: t()
   def post(name, run, opts \\ []) do
     new([name: name, phase: :post, run: run] ++ opts)
+  end
+
+  @doc """
+  Sets the feature for one model call from a sequential pre-hook.
+
+  Select the purpose from explicit operation context. Retries and cancellation
+  keep this value. A subsequent tool-loop call starts from the turn's feature.
+  Recovery hooks cannot relabel a previously dispatched call.
+  Post-hooks cannot relabel a completed call. Parallel hooks only add content.
+  """
+  @spec put_feature(Turn.t(), String.t() | nil) :: Turn.t()
+  def put_feature(%Turn{} = turn, feature) do
+    Config.validate_feature!(feature)
+    %{turn | feature: feature}
   end
 
   @doc """
