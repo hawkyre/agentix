@@ -55,14 +55,19 @@ tool_calls                      -- so HITL suspensions survive a kill
   result          jsonb
   inserted_at / resolved_at
 
-model_calls                     -- OPTIONAL audit, off by default (see below)
+model_calls                     -- OPTIONAL, off by default (see below)
   id              uuid pk
   conversation_id uuid fk
   turn_ref        bigint
-  rendered_context jsonb        -- exactly what was sent to the model
+  rendered_context jsonb        -- exactly what was sent to the model (:full only)
   model           text
-  usage           jsonb
+  usage           jsonb         -- tokens and cost, as the provider reported them
   latency_ms      integer
+  status          text          -- ok | error | cancelled
+  error           text
+  tenant_key      text          -- mirrored from the conversation
+  feature         text          -- mirrored from the conversation
+  pricing_version text          -- the llm_db version that costed this call
   summary_version text          -- which compaction summary applied
   evictions       jsonb         -- what was stubbed/evicted this turn
   inserted_at
@@ -99,26 +104,27 @@ The persisted snapshot is deliberately small (the canonical definition lives in
 fsm_state = %{
   state:    :idle | :awaiting_input,   # only ever persisted in these two
   pending:  %{tool_call_id => %{executor, kind, prompt}},
-  last_seq: N                          # log position the working set was built from
+  last_seq: N,                         # log position at the snapshot
+  turn_feature: "answer",             # turn default, while a turn is in progress
+  feature: "view_generation"          # selected call purpose
 }
 ```
 
-`last_seq` is what lets revival read "latest summary + events since that summary's
-span" instead of replaying from zero (see snapshot cadence below). This one shape is
-the join between the resolver (`03`), the kill/resume path, and the schema. And
-because `suspension`/`resolution` are canonical event types, `fsm_state` is strictly
-a **cache over the log** — rebuildable, never authoritative; on disagreement the log
-wins (canonical statement in `01`).
+The event log and pending tool records determine recovery behavior. The feature
+fields retain execution metadata: a pre-hook's choice cannot always be rebuilt
+from messages. Agentix saves them before provider dispatch and while suspended.
+Each user event also stores its turn feature. A newer user event supersedes an
+older feature snapshot. Completed turns clear the feature snapshot.
 
 Safe-to-suspend states: `idle` and `awaiting_input` are clean to snapshot and
 evict. `streaming` and mid-`:server`-tool are not — there is no persisted
 `streaming` or `executing_tools`. A kill in those states is **not** frozen and
 resumed; recovery is from the log, and the two dangling shapes differ: a log ending
 in a `user_msg` re-runs the LLM turn (safe — no side effects yet); a log ending in a
-`tool_call` with no `tool_result` **re-dispatches that exact call with the same
-`tool_call_id`** — never re-rolls the LLM, which would mint new ids and duplicate
-side effects (canonical statement in `01`). Idempotency on `tool_call_id` also
-covers the kill → revive → late-answer race.
+`tool_call` with no `tool_result` receives its stored terminal result, if one
+exists, or an interrupted error. Agentix does not re-execute an interrupted
+server tool. The host must make side effects idempotent and decide whether a new
+operation can retry them.
 
 ## Timeout machinery
 
@@ -177,13 +183,19 @@ compaction and snapshotting — no separate snapshot table or cadence to tune.
 
 ## Resolved: `model_calls` GC
 
-TTL-based, configurable, **off by default.** It is the fastest-growing, least-
-permanent table and exists only for debugging/evals, so a simple time-based drop (or
-a per-conversation row cap) is enough. Since the audit table itself is off by default
-(below), there is usually nothing to GC; when it is switched on for an eval run, the
-TTL keeps it from growing without bound.
+`gc_model_calls/2` is offered, scheduled by nobody. Which retention is right
+depends on why the host turned recording on, and the two answers are opposite:
+under `:full` the rows carry whole prompts and are the fastest-growing table in
+the schema, so an eval run wants a short TTL. Under `:records` they are small,
+bounded by call volume, and are usually the host's cost record — expiring those
+silently deletes accounting. Agentix will not guess; a host that wants rows to
+expire schedules the call itself.
 
 ## Open questions
 
-- Multi-node persistence story (follows the addressing question in `01`; out of
-  scope for v0).
+- Multi-node writes under a netsplit. `config :agentix, addressing: :global`
+  makes a conversation resolve to one agent cluster-wide, which is what keeps a
+  single writer on the log. A partition defeats it: both sides register an agent
+  and both write, and `:global` resolves the duplicate name on heal by killing
+  one — after the fact. Reconciling those writes is a log-level question, not a
+  registry one.

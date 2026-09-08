@@ -1,7 +1,7 @@
 defmodule Agentix.MixProject do
   use Mix.Project
 
-  @version "0.4.0"
+  @version "0.5.3"
   @source_url "https://github.com/hawkyre/agentix"
 
   def project do
@@ -136,6 +136,7 @@ defmodule Agentix.MixProject do
         "guides/persistence-and-resumability.md",
         "guides/reliability-and-structured-output.md",
         "guides/telemetry.md",
+        "guides/call-features.md",
         "guides/compaction.md",
         "guides/rendering.md",
         "guides/memory-and-sizing.md",

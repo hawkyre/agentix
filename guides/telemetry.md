@@ -2,9 +2,16 @@
 
 Agentix emits [`:telemetry`](https://hexdocs.pm/telemetry) events for every turn,
 every model call, and every tool call. They fire **always** — independent of
-`Config.audit?`, which only controls the durable `model_calls` audit rows. This is
+`Config.model_call_log`, which controls the durable `model_calls` rows. This is
 the surface LLM observability backends (PostHog LLM analytics, Langfuse, OpenTelemetry
 bridges) consume.
+
+Events and rows answer different questions, and a cancelled turn is where they
+diverge: killing the streaming task means that attempt's span emits no terminal
+event at all, so a handler counting spend from telemetry silently misses it. The
+durable row is written by the agent, which knows about the cancel. Use telemetry
+to export live signals; use `model_call_log: :records` when the number has to be
+right afterwards.
 
 Two rules before attaching anything:
 

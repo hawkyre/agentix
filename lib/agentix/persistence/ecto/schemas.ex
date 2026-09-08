@@ -13,6 +13,7 @@ if Code.ensure_loaded?(Ecto.Schema) do
       field(:fsm_state, :map, default: %{})
       field(:status, Ecto.Enum, values: [:active, :suspended, :idle, :ended], default: :active)
       field(:tenant_key, :string)
+      field(:feature, :string)
       timestamps(type: :utc_datetime_usec)
     end
   end
@@ -89,6 +90,11 @@ if Code.ensure_loaded?(Ecto.Schema) do
       field(:model, :string)
       field(:usage, :map)
       field(:latency_ms, :integer)
+      field(:status, Ecto.Enum, values: [:ok, :error, :cancelled], default: :ok)
+      field(:error, :string)
+      field(:tenant_key, :string)
+      field(:feature, :string)
+      field(:pricing_version, :string)
       field(:summary_version, :string)
       field(:evictions, {:array, :map})
       field(:inserted_at, :utc_datetime_usec)

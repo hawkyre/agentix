@@ -134,7 +134,8 @@ if Code.ensure_loaded?(Ecto) do
             settings: row.settings,
             status: row.status,
             fsm_state: decode_fsm_state(row.fsm_state),
-            tenant_key: row.tenant_key
+            tenant_key: row.tenant_key,
+            feature: row.feature
           }
       end
     end
@@ -149,7 +150,8 @@ if Code.ensure_loaded?(Ecto) do
         settings: sanitize_settings(Map.get(attrs, :settings, base.settings || %{})),
         fsm_state: Map.get(attrs, :fsm_state, base.fsm_state || %{}),
         status: Map.get(attrs, :status, base.status || :active),
-        tenant_key: Map.get(attrs, :tenant_key, base.tenant_key)
+        tenant_key: Map.get(attrs, :tenant_key, base.tenant_key),
+        feature: Map.get(attrs, :feature, base.feature)
       })
       |> repo().insert_or_update!()
 
@@ -312,29 +314,66 @@ if Code.ensure_loaded?(Ecto) do
 
     @impl true
     def put_model_call(conversation_id, model_call) do
-      if audit_enabled?() do
-        ensure_conversation(conversation_id)
+      with_model_call_lock(conversation_id, fn ->
+        insert_model_call(conversation_id, model_call)
+      end)
+    end
 
-        attrs =
-          model_call
-          |> Map.new()
-          |> Map.put(:conversation_id, conversation_id)
-          |> Map.put_new(:inserted_at, DateTime.utc_now())
+    @impl true
+    def append_model_call(conversation_id, model_call) do
+      with_model_call_lock(conversation_id, fn ->
+        last_ref =
+          repo().one(
+            from(m in ModelCall,
+              where: m.conversation_id == ^conversation_id,
+              select: max(m.turn_ref)
+            )
+          )
 
-        %ModelCall{}
-        |> Ecto.Changeset.cast(attrs, [
-          :conversation_id,
-          :turn_ref,
-          :rendered_context,
-          :model,
-          :usage,
-          :latency_ms,
-          :summary_version,
-          :evictions,
-          :inserted_at
-        ])
-        |> repo().insert!()
-      end
+        insert_model_call(conversation_id, Map.put(model_call, :turn_ref, (last_ref || 0) + 1))
+      end)
+    end
+
+    defp with_model_call_lock(conversation_id, fun) do
+      {:ok, :ok} =
+        repo().transact(fn ->
+          ensure_conversation(conversation_id)
+
+          repo().one!(
+            from(c in Conversation, where: c.id == ^conversation_id, lock: "FOR NO KEY UPDATE")
+          )
+
+          {:ok, fun.()}
+        end)
+
+      :ok
+    end
+
+    defp insert_model_call(conversation_id, model_call) do
+      attrs =
+        model_call
+        |> Map.new()
+        |> Map.put(:conversation_id, conversation_id)
+        |> Map.put_new(:inserted_at, DateTime.utc_now())
+
+      %ModelCall{}
+      |> Ecto.Changeset.cast(attrs, [
+        :conversation_id,
+        :turn_ref,
+        :rendered_context,
+        :model,
+        :usage,
+        :latency_ms,
+        :status,
+        :error,
+        :tenant_key,
+        :feature,
+        :pricing_version,
+        :summary_version,
+        :evictions,
+        :inserted_at
+      ])
+      |> repo().insert!()
 
       :ok
     end
@@ -427,6 +466,11 @@ if Code.ensure_loaded?(Ecto) do
         model: row.model,
         usage: row.usage,
         latency_ms: row.latency_ms,
+        status: row.status,
+        error: row.error,
+        tenant_key: row.tenant_key,
+        feature: row.feature,
+        pricing_version: row.pricing_version,
         summary_version: row.summary_version,
         evictions: row.evictions,
         inserted_at: row.inserted_at
@@ -447,14 +491,23 @@ if Code.ensure_loaded?(Ecto) do
     # `fsm_state` is the `%{state, pending, last_seq}` cache. `state` and each pending
     # entry's `executor`/`kind` are atoms; pending is keyed by tool_call_id (strings).
     defp decode_fsm_state(map) when is_map(map) and map_size(map) > 0 do
-      %{
+      decoded = %{
         state: atomize(map["state"] || map[:state]),
         pending: decode_pending(map["pending"] || map[:pending] || %{}),
         last_seq: map["last_seq"] || map[:last_seq]
       }
+
+      Enum.reduce([:feature, :turn_feature], decoded, &decode_feature(map, &1, &2))
     end
 
     defp decode_fsm_state(_), do: %{}
+
+    defp decode_feature(map, key, decoded) do
+      case Map.fetch(map, Atom.to_string(key)) do
+        {:ok, value} -> Map.put(decoded, key, value)
+        :error -> if Map.has_key?(map, key), do: Map.put(decoded, key, map[key]), else: decoded
+      end
+    end
 
     defp decode_pending(pending) when is_map(pending),
       do: Map.new(pending, fn {tcid, entry} -> {tcid, decode_pending_entry(entry)} end)
@@ -496,8 +549,6 @@ if Code.ensure_loaded?(Ecto) do
                   "{Agentix.Persistence.Ecto, repo: MyRepo}, got: #{inspect(other)}"
       end
     end
-
-    defp audit_enabled?, do: Application.get_env(:agentix, :audit, false)
 
     defp oban_available?, do: Code.ensure_loaded?(Oban)
 

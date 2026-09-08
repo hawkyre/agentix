@@ -7,6 +7,11 @@ defmodule Agentix.Turn do
   this turn. The scope is **enforced** — a turn always carries one (system scope for
   timeout/recovery-driven turns).
 
+  `feature` is the selected purpose of the current model call. Sequential
+  pre-hooks can change it with `Agentix.Hook.put_feature/2`. A tool-loop
+  continuation starts from the turn's feature, so a prior call's override does
+  not become the default for later calls.
+
   Two fields serve the hook pipeline: `injections` accumulates the
   `ContentPart`s a pre-hook adds (appended at the context tail at assembly time, via
   `Agentix.Hook.inject/2`), and `assistant_message` carries the finalized message to a
@@ -19,6 +24,7 @@ defmodule Agentix.Turn do
   Built with `new/1`; rejects unknown keys.
   """
 
+  alias Agentix.Conversation.Config
   alias Agentix.Scope
 
   @type t :: %__MODULE__{
@@ -27,6 +33,7 @@ defmodule Agentix.Turn do
           assistant_message: ReqLLM.Message.t() | nil,
           turn_ref: term(),
           scope: Scope.t(),
+          feature: String.t() | nil,
           injections: [ReqLLM.Message.ContentPart.t()],
           agent: pid() | nil,
           tool_call_id: String.t() | nil
@@ -38,6 +45,7 @@ defmodule Agentix.Turn do
             assistant_message: nil,
             turn_ref: nil,
             scope: nil,
+            feature: nil,
             injections: [],
             agent: nil,
             tool_call_id: nil
@@ -50,6 +58,7 @@ defmodule Agentix.Turn do
   def new(attrs) do
     turn = struct!(__MODULE__, attrs)
     validate_scope!(turn.scope)
+    Config.validate_feature!(turn.feature)
     turn
   end
 

@@ -19,7 +19,24 @@ defmodule Agentix.Conversation.Config do
     * `hook_timeout` — per parallel pre-hook deadline, in milliseconds; a hook that
       exceeds it is shut down and recorded as a crashed (skipped) injector. Sequential
       hooks run inline and are the author's responsibility to keep bounded.
-    * `audit?` — record `model_calls` for replay/evals (off by default).
+    * `model_call_log` — how much of each provider call to record durably:
+
+        * `:off` (default) — nothing is written.
+        * `:records` — one `model_calls` row per call, carrying model, usage,
+          latency, outcome, `tenant_key` and `feature`, but **not** the prompt.
+          This is the setting for cost and observability: the rows are small,
+          bounded by call volume, and outlive the conversation's own deletion.
+        * `:full` — the same row plus `rendered_context`, the entire assembled
+          prompt, for replay and evals. Storage grows with prompt size, so this
+          is the expensive one.
+
+      Rows are written for **every** outcome — a completed call, a failed one,
+      and a cancelled one — so a turn abandoned mid-stream still leaves evidence
+      that tokens were spent. A failed or cancelled call carries no usage,
+      because usage only exists once the stream assembles.
+    * `audit?` — **deprecated**, kept so conversations persisted before
+      `model_call_log` existed still revive. `true` means `:full`. An explicit
+      `model_call_log` always wins.
     * `retry` — transient-failure retry policy for the **pre-stream** provider call
       (`%{max_attempts: pos_integer, base_ms: pos_integer, max_ms: pos_integer}`, or
       `false` to disable). Exponential backoff with jitter, honoring `retry-after`;
@@ -46,6 +63,16 @@ defmodule Agentix.Conversation.Config do
       the selector for `Agentix.Persistence.delete_by_tenant/1`. **Write-once**: it
       may be set while unset and re-passed with the same value, but a conflicting
       value makes `ensure_started/2` return `{:error, :tenant_key_conflict}`.
+    * `feature` — optional conversation label and default model-call purpose
+      (`nil` or a non-empty string). A turn's `:feature` option overrides the
+      default. A sequential pre-hook can select a different purpose for one call
+      with `Agentix.Hook.put_feature/2`. Each call stores its selected feature,
+      indexed alongside `tenant_key`. The label is not an isolation boundary.
+      Changing the config on revival changes the conversation default; passing
+      config to an already running conversation does not reconfigure it.
+    * `summary_feature` — the purpose of background summary calls. Defaults to
+      `"conversation_summary"`. Hosts can set a specific summary purpose.
+      Requires a non-empty string and does not inherit `feature`.
     * `notifier` / `pubsub` — wiring resolved at runtime; `nil` falls back to
       the application-level configuration.
 
@@ -69,10 +96,13 @@ defmodule Agentix.Conversation.Config do
           default_timeout: pos_integer(),
           hook_timeout: pos_integer(),
           audit?: boolean(),
+          model_call_log: :off | :records | :full,
           retry:
             %{max_attempts: pos_integer(), base_ms: pos_integer(), max_ms: pos_integer()} | false,
           response_format: keyword() | map() | nil,
           tenant_key: String.t() | nil,
+          feature: String.t() | nil,
+          summary_feature: String.t(),
           notifier: module() | nil,
           pubsub: atom() | nil
         }
@@ -107,9 +137,12 @@ defmodule Agentix.Conversation.Config do
     default_timeout: @default_timeout_ms,
     hook_timeout: @default_hook_timeout_ms,
     audit?: false,
+    model_call_log: :off,
     retry: @default_retry,
     response_format: nil,
     tenant_key: nil,
+    feature: nil,
+    summary_feature: "conversation_summary",
     notifier: nil,
     pubsub: nil
   ]
@@ -124,12 +157,20 @@ defmodule Agentix.Conversation.Config do
   """
   @config_fields ~w(model system_prompt tools hooks stream_transformer api_key working_budget
                     injection_reserve tool_retention compaction_window default_timeout
-                    hook_timeout audit? retry response_format tenant_key notifier pubsub)a
+                    hook_timeout audit? model_call_log retry response_format tenant_key feature
+                    summary_feature notifier pubsub)a
   @field_strings Map.new(@config_fields, &{Atom.to_string(&1), &1})
 
   @spec new(keyword() | map()) :: t()
   def new(attrs) do
-    attrs = attrs |> Map.new() |> atomize_known_keys() |> normalize_retention() |> normalize_retry()
+    attrs =
+      attrs
+      |> Map.new()
+      |> atomize_known_keys()
+      |> normalize_retention()
+      |> normalize_retry()
+      |> normalize_model_call_log()
+
     validate_model!(Map.get(attrs, :model))
 
     config = struct!(__MODULE__, attrs)
@@ -142,8 +183,12 @@ defmodule Agentix.Conversation.Config do
     validate_transformer!(config.stream_transformer)
     validate_api_key!(config.api_key)
     validate_retry!(config.retry)
+    validate_model_call_log!(config.model_call_log)
     validate_response_format!(config.response_format)
     Agentix.TenantKey.validate!(config.tenant_key)
+    validate_feature!(config.feature)
+    validate_feature!(config.summary_feature)
+    if is_nil(config.summary_feature), do: raise(ArgumentError, "summary_feature must not be nil")
     config
   end
 
@@ -199,6 +244,20 @@ defmodule Agentix.Conversation.Config do
 
   defp normalize_retry(attrs), do: attrs
 
+  # `model_call_log` replaced the `audit?` boolean. A config that names it wins;
+  # one that does not falls back to `audit?`, so conversations persisted before
+  # the field existed revive with the logging they were configured for instead of
+  # silently losing it. A JSON round-trip (Ecto) hands the level back as a string.
+  defp normalize_model_call_log(attrs) do
+    case Map.get(attrs, :model_call_log) do
+      nil -> Map.put(attrs, :model_call_log, level_from_audit(Map.get(attrs, :audit?)))
+      level -> Map.put(attrs, :model_call_log, atomize(level))
+    end
+  end
+
+  defp level_from_audit(true), do: :full
+  defp level_from_audit(_audit), do: :off
+
   defp atomize(value) when is_binary(value), do: String.to_existing_atom(value)
   defp atomize(value), do: value
 
@@ -234,6 +293,31 @@ defmodule Agentix.Conversation.Config do
     raise ArgumentError,
           "api_key must be nil, a non-empty string, or a 0-arity resolver function, " <>
             "got: #{inspect(other)}"
+  end
+
+  defp validate_model_call_log!(level) when level in [:off, :records, :full], do: :ok
+
+  defp validate_model_call_log!(other) do
+    raise ArgumentError,
+          "model_call_log must be :off, :records, or :full, got: #{inspect(other)}"
+  end
+
+  # Same shape rule as `tenant_key` and the same cap, for the same reason: it is
+  # written to an indexed column, and Postgres raises on an over-long index entry
+  # at write time rather than here.
+  @doc false
+  @spec validate_feature!(String.t() | nil) :: :ok
+  def validate_feature!(nil), do: :ok
+
+  def validate_feature!(feature)
+      when is_binary(feature) and feature != "" and byte_size(feature) <= 255 do
+    if String.trim(feature) == "", do: raise(ArgumentError, "feature must not be blank")
+    :ok
+  end
+
+  def validate_feature!(other) do
+    raise ArgumentError,
+          "feature must be nil or a 1..255-byte string, got: #{inspect(other)}"
   end
 
   defp validate_transformer!(nil), do: :ok
