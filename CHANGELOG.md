@@ -7,15 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Per-turn `send_message/4` feature labels and per-call `Hook.put_feature/2`
-  overrides. Each call retains its label through retries and cancellation.
-  Recovery preserves the turn default and the last selected call feature.
-- `Config.summary_feature` assigns an explicit purpose to background summaries.
-  The default is `"conversation_summary"`.
-- No database migration is required.
-
 ## [0.5.3] - 2026-09-05
 
 ### Fixed
@@ -32,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-turn `send_message/4` feature labels and per-call `Hook.put_feature/2`
+  overrides. Each call retains its label through retries and cancellation.
+  Recovery preserves the turn default and the last selected call feature.
+- `Config.summary_feature` assigns an explicit purpose to background summaries.
+  The default is `"conversation_summary"`.
 - Optional `Agentix.Persistence.append_model_call/2` callback for atomic reference
   allocation and insertion. Existing adapters use a compatibility fallback.
   No database migration is required for this update.
