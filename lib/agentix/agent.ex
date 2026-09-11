@@ -37,9 +37,12 @@ defmodule Agentix.Agent do
       :conversation_id,
       :config,
       :publisher,
+      :input_checkpoint,
       last_seq: 0,
       turn: nil
     ]
+
+    @type t :: %__MODULE__{}
   end
 
   ## Public addressing
@@ -54,6 +57,7 @@ defmodule Agentix.Agent do
           messages: [Message.t()],
           history_cursor: non_neg_integer() | nil,
           more?: boolean(),
+          input_receipts: [map()],
           streaming_message:
             %{id: String.t(), text: String.t(), thinking: String.t(), seq: non_neg_integer()}
             | nil,
@@ -65,6 +69,7 @@ defmodule Agentix.Agent do
   @type history_page :: %{
           messages: [Message.t()],
           cursor: non_neg_integer() | nil,
+          input_receipts: [map()],
           more?: boolean()
         }
 
@@ -88,6 +93,7 @@ defmodule Agentix.Agent do
     |> Map.put(:messages, page.messages)
     |> Map.put(:history_cursor, page.cursor)
     |> Map.put(:more?, page.more?)
+    |> Map.put(:input_receipts, Agentix.InputAdmission.restore(conversation_id))
   end
 
   @doc """
@@ -104,6 +110,7 @@ defmodule Agentix.Agent do
 
     %{
       messages: Enum.flat_map(events, &event_to_messages/1),
+      input_receipts: Agentix.InputAdmission.receipts(events),
       cursor: cursor,
       more?: cursor != nil and cursor > 1
     }
@@ -167,11 +174,13 @@ defmodule Agentix.Agent do
 
         {summary, events} = Persistence.load_since(conversation_id)
         last_seq = max_seq(summary, events)
+        input_receipts = restore_input_receipts(config, conversation_id)
 
         data = %Data{
           conversation_id: conversation_id,
           config: config,
           publisher: Publisher.new(config, conversation_id),
+          input_checkpoint: Agentix.InputAdmission.checkpoint(conversation_id, input_receipts),
           last_seq: last_seq
         }
 
@@ -208,6 +217,25 @@ defmodule Agentix.Agent do
   ## State: preparing — assemble context and launch the streaming task
 
   def preparing(:internal, :assemble, data) do
+    case admit_inputs(data) do
+      {:ok, data, _admitted?} -> prepare_context(data)
+      {:error, reason, data} -> fail_input_source(reason, data)
+    end
+  end
+
+  def preparing({:call, from}, {:send_message, _m, _s, _o}, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
+  end
+
+  def preparing({:call, from}, :cancel, data) do
+    {data, actions} = abort_turn(data, from)
+    {:next_state, :idle, data, actions}
+  end
+
+  def preparing(event_type, event, data), do: handle_common(:preparing, event_type, event, data)
+
+  @spec prepare_context(Data.t()) :: term()
+  defp prepare_context(data) do
     base = assemble_context(data)
 
     # Pre-hooks run inline here (like context assembly itself); they inject context
@@ -225,17 +253,6 @@ defmodule Agentix.Agent do
         halt_turn(data, reason)
     end
   end
-
-  def preparing({:call, from}, {:send_message, _m, _s, _o}, _data) do
-    {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
-  end
-
-  def preparing({:call, from}, :cancel, data) do
-    {data, actions} = abort_turn(data, from)
-    {:next_state, :idle, data, actions}
-  end
-
-  def preparing(event_type, event, data), do: handle_common(:preparing, event_type, event, data)
 
   ## State: streaming — forward deltas, finalize on completion
 
@@ -575,9 +592,81 @@ defmodule Agentix.Agent do
         if is_nil(data.turn.schema) and match?([_ | _], message.tool_calls) do
           begin_tool_calls(data, message.tool_calls)
         else
-          finish_turn(data)
+          complete_or_continue(data)
         end
     end
+  end
+
+  @spec complete_or_continue(Data.t()) :: term()
+  defp complete_or_continue(data) do
+    case admit_inputs(data) do
+      {:ok, data, true} -> continue_turn(data)
+      {:ok, data, false} -> finish_turn(data)
+      {:error, reason, data} -> fail_input_source(reason, data)
+    end
+  end
+
+  @spec restore_input_receipts(Config.t(), String.t()) :: [map()]
+  defp restore_input_receipts(%Config{input_source: nil}, _conversation_id), do: []
+
+  defp restore_input_receipts(_config, conversation_id),
+    do: Agentix.InputAdmission.restore(conversation_id)
+
+  @spec admit_inputs(Data.t()) :: {:ok, Data.t(), boolean()} | {:error, term(), Data.t()}
+  defp admit_inputs(%Data{config: %Config{input_source: nil}} = data), do: {:ok, data, false}
+
+  defp admit_inputs(%Data{input_checkpoint: nil} = data) do
+    case Agentix.InputAdmission.refresh(data.conversation_id) do
+      {:ok, receipts} ->
+        admit_inputs(%{
+          data
+          | input_checkpoint: Agentix.InputAdmission.checkpoint(data.conversation_id, receipts)
+        })
+
+      {:error, reason} ->
+        {:error, reason, data}
+    end
+  end
+
+  defp admit_inputs(data) do
+    case Agentix.InputAdmission.fetch(data.config.input_source, data.input_checkpoint) do
+      {:ok, inputs} -> append_inputs(data, inputs)
+      {:error, reason} -> {:error, reason, data}
+    end
+  end
+
+  @spec append_inputs(Data.t(), [Agentix.SourceInput.t()]) ::
+          {:ok, Data.t(), boolean()} | {:error, term(), Data.t()}
+  defp append_inputs(data, inputs) do
+    Enum.reduce_while(inputs, {:ok, data, false}, fn input, {:ok, data, _admitted?} ->
+      case Agentix.InputAdmission.append(data.conversation_id, input, data.turn.turn_feature) do
+        {:ok, receipt} ->
+          data = %{
+            data
+            | last_seq: receipt["event_sequence"],
+              input_checkpoint: Agentix.InputAdmission.record(data.input_checkpoint, receipt)
+          }
+
+          Publisher.publish(data.publisher, {:input_admitted, data.turn.ref, receipt})
+          {:cont, {:ok, data, true}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason, %{data | input_checkpoint: nil}}}
+      end
+    end)
+  end
+
+  @spec fail_input_source(term(), Data.t()) :: term()
+  defp fail_input_source(reason, data) do
+    Publisher.turn_failed(data.publisher, data.turn.ref, reason)
+
+    :telemetry.execute([:agentix, :turn, :exception], %{}, %{
+      conversation_id: data.conversation_id,
+      turn_ref: data.turn.ref,
+      reason: reason
+    })
+
+    finish(data, :idle)
   end
 
   # No tool calls — the turn is genuinely complete.

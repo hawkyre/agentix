@@ -83,6 +83,8 @@ defmodule Agentix.Addressing do
   defp from_global(:undefined), do: :error
 
   @spec from_registry([{pid(), term()}]) :: {:ok, pid()} | :error
-  defp from_registry([{pid, _value} | _rest]), do: {:ok, pid}
+  defp from_registry([{pid, _value} | _rest]),
+    do: if(Process.alive?(pid), do: {:ok, pid}, else: :error)
+
   defp from_registry([]), do: :error
 end

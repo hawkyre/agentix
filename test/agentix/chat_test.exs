@@ -19,6 +19,12 @@ defmodule Agentix.ChatTest do
     install_mock_provider()
     id = "conv-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
     Phoenix.PubSub.subscribe(Agentix.PubSub, Publisher.topic(id))
+
+    on_exit(fn ->
+      Conversation.cancel(id)
+      Conversation.stop(id)
+    end)
+
     {:ok, id: id, conn: build_conn()}
   end
 
@@ -323,7 +329,8 @@ defmodule Agentix.ChatTest do
 
       # The stream delivered one chunk, then parked the streaming task — the turn is now
       # genuinely mid-stream with partial text accumulated in the agent.
-      assert_receive {:agentix_streaming, task_pid}
+      {:streaming, %{turn: %{task_pid: task_pid}}} = :sys.get_state(Agentix.Agent.via(ctx.id))
+      assert_receive {:agentix_streaming, ^task_pid}
 
       # A fresh mount fetches the snapshot and seeds the hook with the partial text.
       {:ok, view2, _html} = mount_chat(build_conn(), ctx.id)

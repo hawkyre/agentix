@@ -50,6 +50,9 @@ defmodule Agentix.Conversation.Config do
     * `hooks` — `Agentix.Hook` structs run around each model call.
     * `stream_transformer` — a `(chunk -> chunk)` seam applied to each stream chunk
       (`nil` is the identity default).
+    * `input_source` — an optional `Agentix.InputCheckpoint.source/0` callback.
+      It supplies stored user messages between model calls and before completion.
+      Rebuild it on revival; the Ecto adapter does not persist callbacks.
     * `api_key` — the provider API key for this conversation's model calls: a string,
       a **0-arity resolver fun** (re-evaluated on every model call, so a rotated key
       takes effect on the next turn), or `nil` to fall back to ReqLLM's own key
@@ -88,6 +91,7 @@ defmodule Agentix.Conversation.Config do
           tools: list(),
           hooks: [Agentix.Hook.t()],
           stream_transformer: (term() -> term()) | nil,
+          input_source: Agentix.InputCheckpoint.source() | nil,
           api_key: String.t() | (-> String.t()) | nil,
           working_budget: pos_integer(),
           injection_reserve: pos_integer(),
@@ -129,6 +133,7 @@ defmodule Agentix.Conversation.Config do
     tools: [],
     hooks: [],
     stream_transformer: nil,
+    input_source: nil,
     api_key: nil,
     working_budget: @default_working_budget,
     injection_reserve: @default_injection_reserve,
@@ -155,7 +160,7 @@ defmodule Agentix.Conversation.Config do
   unknown keys. String keys naming a known field are accepted (so a config can be rebuilt
   from a persistence adapter that round-trips settings as JSON).
   """
-  @config_fields ~w(model system_prompt tools hooks stream_transformer api_key working_budget
+  @config_fields ~w(model system_prompt tools hooks stream_transformer input_source api_key working_budget
                     injection_reserve tool_retention compaction_window default_timeout
                     hook_timeout audit? model_call_log retry response_format tenant_key feature
                     summary_feature notifier pubsub)a
@@ -181,6 +186,7 @@ defmodule Agentix.Conversation.Config do
     validate_positive!(:hook_timeout, config.hook_timeout)
     validate_retention!(config.tool_retention)
     validate_transformer!(config.stream_transformer)
+    validate_input_source!(config.input_source)
     validate_api_key!(config.api_key)
     validate_retry!(config.retry)
     validate_model_call_log!(config.model_call_log)
@@ -319,6 +325,13 @@ defmodule Agentix.Conversation.Config do
     raise ArgumentError,
           "feature must be nil or a 1..255-byte string, got: #{inspect(other)}"
   end
+
+  @spec validate_input_source!(term()) :: :ok
+  defp validate_input_source!(nil), do: :ok
+  defp validate_input_source!(source) when is_function(source, 1), do: :ok
+
+  defp validate_input_source!(_source),
+    do: raise(ArgumentError, "input_source must be nil or a 1-arity function")
 
   defp validate_transformer!(nil), do: :ok
   defp validate_transformer!(fun) when is_function(fun, 1), do: :ok
