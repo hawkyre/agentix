@@ -164,7 +164,7 @@ if Code.ensure_loaded?(Ecto) do
     # keeps them verbatim, so this trimming is Ecto-only). `api_key` is dropped for secrecy,
     # not just serializability: even its string form must never land in a durable row (and
     # the resolver-fun form would crash the jsonb encode).
-    @nonserializable_settings ~w(tools hooks stream_transformer api_key notifier pubsub)
+    @nonserializable_settings ~w(tools hooks stream_transformer input_source api_key notifier pubsub)
     @nonserializable_keys @nonserializable_settings ++
                             Enum.map(@nonserializable_settings, &String.to_atom/1)
 
