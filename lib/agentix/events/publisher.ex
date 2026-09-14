@@ -14,6 +14,7 @@ defmodule Agentix.Events.Publisher do
           | {:text_delta, term(), String.t(), String.t(), non_neg_integer()}
           | {:thinking_delta, term(), String.t(), String.t(), non_neg_integer()}
           | {:message_completed, term(), ReqLLM.Message.t()}
+          | {:input_admitted, term(), map()}
           | {:tool_call_started, String.t(), String.t(), atom(), map()}
           | {:tool_progress, String.t(), term()}
           | {:tool_call_resolved, String.t(), term()}
